@@ -1,0 +1,30 @@
+{
+  "microsoft": {
+    "client_id": "YOUR_MICROSOFT_CLIENT_ID_HERE",
+    "client_secret": "YOUR_MICROSOFT_CLIENT_SECRET_HERE",
+    "tenant_id": "YOUR_MICROSOFT_TENANT_ID_HERE",
+    "redirect_uri": "http://localhost:8080/callback"
+  },
+  "claude": {
+    "api_key": "YOUR_CLAUDE_API_KEY_HERE",
+    "model": "claude-sonnet-4-20250514"
+  },
+  "email": {
+    "folder_name": "DMARC Reports",
+    "processed_folder": "DMARC Processed",
+    "lookback_hours": 24,
+    "max_lookback_hours": 168
+  },
+  "notifications": {
+    "email_results": true,
+    "email_to": "your-email@example.com",
+    "email_subject_prefix": "[DMARC Analysis]",
+    "quiet_mode": true
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "logs/dmarc_monitor.log",
+    "max_size_mb": 10,
+    "backup_count": 5
+  }
+}
