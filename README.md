@@ -137,11 +137,11 @@ crontab -e
 
 Add these lines:
 ```bash
-# Main run: 10AM Monday-Friday  
-0 10 * * 1-5 cd ~/utilities/dmarc-monitor && /usr/bin/python3 src/dmarc_monitor.py >> logs/cron.log 2>&1
+# Main run: 10AM Monday-Friday
+0 10 * * 1-5 cd ~/myworkspace/Utilities/dmarc-monitor && /opt/anaconda3/bin/python3 src/dmarc_monitor.py >> logs/cron.log 2>&1
 
 # Retry run: 5PM Monday-Friday (only if morning failed)
-0 17 * * 1-5 cd ~/utilities/dmarc-monitor && /usr/bin/python3 scripts/retry_if_failed.py >> logs/cron.log 2>&1
+0 17 * * 1-5 cd ~/myworkspace/Utilities/dmarc-monitor && /opt/anaconda3/bin/python3 scripts/retry_if_failed.py >> logs/cron.log 2>&1
 ```
 
 ### How Scheduling Works
