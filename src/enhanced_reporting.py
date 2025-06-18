@@ -75,9 +75,19 @@ class EnhancedReporter:
             if new_sources > avg_sources + self.thresholds.get('new_sources_threshold', 3):
                 return True
         
-        # Check Claude analysis for issue indicators
+        # Check Claude analysis for issue indicators with better context
         issue_keywords = ['issue', 'problem', 'fail', 'suspicious', 'error', 'warning', '⚠️', '❌']
-        if any(keyword in claude_analysis.lower() for keyword in issue_keywords):
+        positive_keywords = ['none detected', 'no issues', 'perfect', 'healthy', 'working well', 'no problems', 
+                           'perfect scores', 'all clear', 'success', 'passing', 'legitimate']
+
+        analysis_lower = claude_analysis.lower()
+
+        # Don't flag as issue if positive indicators are present
+        if any(positive in analysis_lower for positive in positive_keywords):
+            return False
+
+        # Only flag if issue keywords are present without positive context
+        if any(keyword in analysis_lower for keyword in issue_keywords):
             return True
         
         return False
