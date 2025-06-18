@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-DMARC Report Monitor - Enhanced Version
-Monitors Outlook mailbox for DMARC reports and analyzes them using Claude API
+DMARC Report Monitor - Phase 2 Enhanced Version
+Monitors Outlook mailbox for DMARC reports with intelligent alerting and historical analysis
 """
 
 import os
@@ -13,6 +13,8 @@ from datetime import datetime, timedelta
 import requests
 import logging
 import time
+from database import DMARCDatabase
+from enhanced_reporting import EnhancedReporter
 
 def load_config():
     """Load configuration from config file"""
@@ -629,16 +631,57 @@ def mark_run_as_failed():
         f.write(datetime.now().isoformat())
 
 def main():
-    """Main execution function"""
-    logger.info("Starting DMARC report monitor")
+    """Main execution function with Phase 2 enhancements"""
+    logger.info("Starting DMARC report monitor (Phase 2)")
     
     analyzed_reports = []
     
     try:
-        # Initialize clients
+        # Initialize clients and database
         outlook_client = OutlookClient(CONFIG['microsoft'])
         claude_analyzer = ClaudeAnalyzer(CONFIG['claude']['api_key'], CONFIG['claude']['model'])
         dmarc_parser = DMARCParser()
+        database = DMARCDatabase()
+        enhanced_reporter = EnhancedReporter(CONFIG, database)
+        
+        # Check if this is first run with Phase 2 and migrate existing data
+        if not os.path.exists("data/migration_completed.txt"):
+            logger.info("Performing one-time migration of existing data to database...")
+            migrated_count = database.migrate_existing_data()
+            with open("data/migration_completed.txt", "w") as f:
+                f.write(f"Migration completed at {datetime.now().isoformat()}\nFiles processed: {migrated_count}")
+            logger.info(f"Migration completed: {migrated_count} files processed")
+        
+        # Perform database maintenance if configured
+        db_config = CONFIG.get('database', {})
+        if db_config.get('auto_purge', True):
+            retention_days = db_config.get('retention_days', 30)
+            purge_on_startup = db_config.get('purge_on_startup', False)
+            
+            # Get database stats before purge
+            db_stats = database.get_database_stats()
+            
+            # Only purge if database has grown significantly or if explicitly configured
+            should_purge = (
+                purge_on_startup or 
+                db_stats.get('database_size_mb', 0) > 10 or  # > 10MB
+                db_stats.get('total_reports', 0) > 100       # > 100 reports
+            )
+            
+            if should_purge:
+                logger.info(f"Database size: {db_stats.get('database_size_mb', 0)}MB, "
+                          f"Total reports: {db_stats.get('total_reports', 0)}")
+                purge_stats = database.purge_old_data(retention_days)
+                
+                if purge_stats['reports_deleted'] > 0:
+                    logger.info(f"Database maintenance completed: Purged {purge_stats['reports_deleted']} "
+                              f"reports older than {retention_days} days")
+                    
+                    # Log final size
+                    final_stats = database.get_database_stats()
+                    logger.info(f"Database size after purge: {final_stats.get('database_size_mb', 0)}MB")
+                else:
+                    logger.info(f"No data older than {retention_days} days found to purge")
         
         # Authenticate with Outlook
         if not outlook_client.get_access_token():
@@ -696,13 +739,17 @@ def main():
                 # Analyze with Claude
                 analysis = claude_analyzer.analyze_dmarc_report(parsed_report)
                 
+                # Store in database for historical tracking
+                db_report_id = database.store_report(parsed_report, analysis)
+                
                 # Store for consolidated report
                 analyzed_reports.append({
                     'domain': parsed_report['policy']['domain'],
                     'claude_analysis': analysis,
                     'raw_data': parsed_report,
                     'message_subject': message['subject'],
-                    'received_time': message['receivedDateTime']
+                    'received_time': message['receivedDateTime'],
+                    'db_report_id': db_report_id
                 })
                 
                 # Save analysis locally in data directory
@@ -729,47 +776,35 @@ Raw Report Summary:
                 
                 logger.info(f"Successfully analyzed report for {parsed_report['policy']['domain']}")
         
-        # Send consolidated notification if any reports were processed
-        if analyzed_reports:
-            consolidated_report = create_consolidated_report(analyzed_reports)
-            
-            if consolidated_report and CONFIG['notifications'].get('email_results', True):
-                email_subject = f"{CONFIG['notifications']['email_subject_prefix']} Daily Report - {len(analyzed_reports)} domains analyzed"
-                
-                success = outlook_client.send_email(
-                    CONFIG['notifications']['email_to'],
-                    email_subject,
-                    consolidated_report
-                )
-                
-                if success:
-                    logger.info(f"Consolidated report sent successfully ({len(analyzed_reports)} reports)")
-                else:
-                    logger.error("Failed to send consolidated report")
+        # Generate intelligent report using Phase 2 enhanced reporting
+        report_data = enhanced_reporter.generate_smart_report(analyzed_reports)
         
-        elif CONFIG['notifications'].get('quiet_mode', True):
-            # Quiet mode - no email if no reports found
-            logger.info("No new DMARC reports found - quiet mode enabled, no notification sent")
-        else:
-            # Send "no reports" notification
-            no_reports_subject = f"{CONFIG['notifications']['email_subject_prefix']} No New Reports"
-            no_reports_body = f"""
-DMARC Monitor Report - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-No new DMARC reports were found in the last {lookback_hours:.1f} hours.
-
-Checked folder: {CONFIG['email']['folder_name']}
-Messages found: {len(messages)}
-DMARC reports: 0
-
-This is an automated status report from the DMARC Monitor.
-"""
-            
-            outlook_client.send_email(
+        # Send report if needed
+        if enhanced_reporter.should_send_report(report_data):
+            success = outlook_client.send_email(
                 CONFIG['notifications']['email_to'],
-                no_reports_subject,
-                no_reports_body
+                report_data['subject'],
+                report_data['body']
             )
+            
+            if success:
+                if report_data.get('has_issues', False):
+                    logger.info(f"Issue alert sent successfully ({report_data.get('issue_count', 0)} domains with issues)")
+                    # Log alert to database
+                    for report in analyzed_reports:
+                        if enhanced_reporter._has_significant_issues(report):
+                            database.log_alert(
+                                report['raw_data']['policy']['domain'],
+                                'authentication_issues',
+                                'Multiple thresholds exceeded',
+                                sent=True
+                            )
+                else:
+                    logger.info(f"Clean status report sent successfully ({report_data.get('clean_count', 0)} domains)")
+            else:
+                logger.error("Failed to send enhanced report")
+        else:
+            logger.info("No report needed based on current configuration and analysis results")
         
         # Mark run as successful
         save_last_run_time()

@@ -14,6 +14,15 @@ data/*.txt
 data/*.xml
 data/*.json
 
+# Phase 2 Database files
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+data/test_*.db
+data/*_backup.db
+data/*.db-*
+data/migration_completed.txt
+
 # Analysis output files
 dmarc_analysis_*.txt
 

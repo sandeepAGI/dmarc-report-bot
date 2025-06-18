@@ -19,7 +19,19 @@
     "email_results": true,
     "email_to": "your-email@example.com",
     "email_subject_prefix": "[DMARC Analysis]",
-    "quiet_mode": true
+    "quiet_mode": true,
+    "send_clean_status": true
+  },
+  "thresholds": {
+    "auth_success_rate_min": 95.0,
+    "auth_rate_drop_threshold": 5.0,
+    "new_sources_threshold": 3,
+    "minimum_messages_for_alert": 10
+  },
+  "database": {
+    "retention_days": 30,
+    "auto_purge": true,
+    "purge_on_startup": false
   },
   "logging": {
     "level": "INFO",
