@@ -20,6 +20,9 @@ Automatically monitors Outlook for DMARC reports and analyzes them using Claude 
 - **Clean Status Emails** - Confirmation emails when no issues are detected
 - **Automatic Issue Detection** - Identifies authentication failures, suspicious IPs, and policy violations
 - **Context-Aware Analysis** - Improved keyword detection prevents false positives for domains with perfect scores
+- **🆕 Detailed Failure Analysis** - Specific IP addresses, message counts, and failure types with actionable recommendations
+- **🆕 IP Intelligence** - Identifies legitimate email providers vs. suspicious sources requiring investigation
+- **🆕 Historical Failure Context** - Clean reports show "No failures since X" for confidence building
 
 ### 🚀 Phase 3 (Future Enhancements)
 - **Web Dashboard** - Visual trends and historical data with charts and graphs
@@ -56,10 +59,12 @@ Automatically monitors Outlook for DMARC reports and analyzes them using Claude 
 │   ├── database.py             # SQLite database management (Phase 2)
 │   └── enhanced_reporting.py   # Intelligent reporting system (Phase 2)
 ├── scripts/
-│   ├── setup.py                # Configuration setup
-│   ├── retry_if_failed.py      # Retry logic for cron
-│   ├── test_phase2.py          # Phase 2 test suite
-│   └── database_maintenance.py # Database maintenance utility
+│   ├── setup.py                      # Configuration setup
+│   ├── retry_if_failed.py            # Retry logic for cron
+│   ├── test_phase2.py                # Phase 2 test suite
+│   ├── test_enhanced_failures.py     # Enhanced failure details unit tests
+│   ├── test_end_to_end.py            # End-to-end integration test
+│   └── database_maintenance.py       # Database maintenance utility
 ├── logs/                       # Execution logs
 │   └── dmarc_monitor.log
 └── data/                       # Analysis results & tracking
@@ -316,7 +321,7 @@ python src/dmarc_monitor.py
 
 #### Issues Detected Report (when problems found)
 ```
-🚨 DMARC ISSUES DETECTED - 2025-06-18 10:15:23
+🚨 DMARC ISSUES DETECTED - 2025-07-11 10:15:23
 ============================================================
 
 EXECUTIVE SUMMARY
@@ -335,6 +340,28 @@ DOMAINS REQUIRING ATTENTION
 📈 Historical Trend: Declined (-12.5% vs 30-day avg)
 ⏰ Report Period: 1634140800 to 1634227200
 
+🔍 DETAILED FAILURE ANALYSIS:
+
+  Failed Authentication Details:
+  • 3 IP(s) with 295 failed message(s)
+
+  • 50.63.9.60: 150 message(s) - DKIM ❌ FAIL, SPF ❌ FAIL
+    └─ Unknown Provider (50.63.x.x range) ⚠️ INVESTIGATE
+  • 192.168.1.100: 100 message(s) - DKIM ✅ PASS, SPF ❌ FAIL
+    └─ Unknown Provider
+  • 203.0.113.45: 45 message(s) - DKIM ❌ FAIL, SPF ✅ PASS
+    └─ Example ISP
+
+  📋 RECOMMENDED ACTIONS:
+  1. **Investigate IP range 50.63.x.x:** All failures from same subnet
+  2. **DKIM Issues:** 2 IP(s) failing DKIM - check signing configuration
+  3. **SPF Issues:** 2 IP(s) failing SPF - verify authorized senders
+  4. **Verification Steps:**
+     - Check SPF record: dig TXT example.com | grep spf
+     - Verify these IPs are legitimate senders for example.com
+     - If legitimate: update SPF record and configure DKIM
+     - If malicious: consider abuse reporting
+
 🔍 ANALYSIS & RECOMMENDATIONS:
   • Update DKIM keys for newsletter platform
   • Review SPF record for new IP 192.168.1.100
@@ -348,7 +375,7 @@ The following domains showed no significant issues:
 
 #### Clean Status Report (when no issues found)
 ```
-✅ ALL SYSTEMS HEALTHY - 2025-06-18 10:15:23
+✅ ALL SYSTEMS HEALTHY - 2025-07-11 10:15:23
 ============================================================
 
 EXECUTIVE SUMMARY
@@ -363,10 +390,12 @@ DOMAIN STATUS
 ✅ aileron-group.com (reported by Google)
    📊 Authentication Rate: 99.1% (1,528/1,542 messages)
    📈 Trend: Stable (+0.3% vs 30-day avg)
+   🛡️ No failures detected since 2025-07-09
 
 ✅ example.com (reported by Microsoft)
    📊 Authentication Rate: 98.2% (491/500 messages)
    📊 Trend: Stable (-0.1% vs 30-day avg)
+   🛡️ No failures detected in monitoring history
 
 ============================================================
 🛡️  All DMARC policies are working effectively
@@ -444,6 +473,12 @@ DETAILED ANALYSIS
 ```bash
 # Test Phase 2 database and reporting features
 python scripts/test_phase2.py
+
+# Test enhanced failure details functionality
+python scripts/test_enhanced_failures.py
+
+# Run comprehensive end-to-end test
+python scripts/test_end_to_end.py
 
 # Test specific components
 python -c "from scripts.test_phase2 import test_database; test_database()"
@@ -691,15 +726,48 @@ python scripts/database_maintenance.py export --output db_info.json
 }
 ```
 
+#### Enhanced Database Features
+
+The database now includes advanced querying capabilities for detailed failure analysis:
+
+```python
+# Example usage of new database methods
+from database import DMARCDatabase
+
+db = DMARCDatabase()
+
+# Get detailed failure information for a specific report
+failure_details = db.get_failure_details('example.com', report_id)
+# Returns: [{'source_ip': '50.63.9.60', 'count': 2, 'dkim_result': 'fail', 'spf_result': 'fail'}, ...]
+
+# Get the last date when failures occurred for a domain
+last_failure = db.get_last_failure_date('example.com')
+# Returns: '2025-07-09' or None if no failures found
+
+# Get intelligence about an IP address
+ip_intel = db.get_ip_intelligence('50.63.9.60')
+# Returns: {'organization': 'Unknown Provider', 'is_suspicious': True, ...}
+```
+
 ### New Files Created
-- `src/database.py` - Database management system with auto-purging
-- `src/enhanced_reporting.py` - Intelligent reporting engine with context-aware analysis
-- `scripts/test_phase2.py` - Comprehensive test suite
+- `src/database.py` - Database management system with auto-purging and enhanced failure analysis
+- `src/enhanced_reporting.py` - Intelligent reporting engine with detailed failure breakdown
+- `scripts/test_phase2.py` - Comprehensive test suite for Phase 2 features
+- `scripts/test_enhanced_failures.py` - Unit tests for enhanced failure details functionality
+- `scripts/test_end_to_end.py` - End-to-end integration test demonstrating new features
 - `scripts/database_maintenance.py` - Database maintenance utility
 - `data/dmarc_monitor.db` - SQLite database (auto-created)
 - `data/migration_completed.txt` - Migration status tracker
 
 ### Recent Improvements
+
+#### Enhanced Failure Details (July 2025)
+- **Detailed Failure Analysis**: Reports now include specific IP addresses, message counts, and failure types (DKIM/SPF) for actionable troubleshooting
+- **IP Intelligence**: Automatic categorization of IP sources (Microsoft/Google vs. suspicious ranges) with investigation flags
+- **Historical Context**: Clean reports show "No failures detected since [date]" for confidence building
+- **Actionable Recommendations**: Specific DNS verification commands and step-by-step investigation guidance
+
+#### Previous Improvements
 - **Fixed False Positive Alerts** (June 2025): Enhanced keyword detection logic prevents domains with perfect authentication scores from being incorrectly flagged as having issues
 - **Improved Context Analysis**: System now recognizes positive indicators like "NONE DETECTED" and "PERFECT SCORES" to avoid misleading alert headlines
 

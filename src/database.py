@@ -393,6 +393,74 @@ class DMARCDatabase:
                 'error': str(e)
             }
     
+    def get_failure_details(self, domain: str, report_id: int) -> List[Dict]:
+        """Get detailed failure information for a specific report"""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT rec.source_ip, rec.count, rec.dkim_result, rec.spf_result, rec.disposition
+                FROM records rec
+                JOIN reports rep ON rec.report_id = rep.id
+                WHERE rep.domain = ? AND rep.id = ? 
+                AND (rec.dkim_result <> 'pass' OR rec.spf_result <> 'pass')
+                ORDER BY rec.count DESC, rec.source_ip
+            """, (domain, report_id))
+            
+            return [dict(row) for row in cursor.fetchall()]
+    
+    def get_last_failure_date(self, domain: str) -> Optional[str]:
+        """Get the date of the last authentication failure for a domain"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("""
+                SELECT MAX(rep.date_end) as last_failure_timestamp
+                FROM reports rep
+                JOIN records rec ON rep.id = rec.report_id
+                WHERE rep.domain = ? 
+                AND (rec.dkim_result <> 'pass' OR rec.spf_result <> 'pass')
+            """, (domain,))
+            
+            result = cursor.fetchone()
+            if result and result[0]:
+                # Convert timestamp to readable date
+                failure_date = datetime.fromtimestamp(result[0])
+                return failure_date.strftime('%Y-%m-%d')
+            return None
+    
+    def get_ip_intelligence(self, ip_address: str) -> Dict:
+        """Get basic intelligence about an IP address (simplified implementation)"""
+        # This is a basic implementation - in production you might want to integrate
+        # with IP intelligence services like IPinfo, MaxMind, etc.
+        
+        # Basic categorization based on IP ranges
+        intelligence = {
+            'ip': ip_address,
+            'organization': 'Unknown Provider',
+            'category': 'unknown',
+            'is_suspicious': False
+        }
+        
+        # Known legitimate ranges (simplified examples)
+        if ip_address.startswith('40.107.') or ip_address.startswith('40.92.'):
+            intelligence.update({
+                'organization': 'Microsoft Corporation (Office 365)',
+                'category': 'email_service',
+                'is_suspicious': False
+            })
+        elif ip_address.startswith('209.85.') or ip_address.startswith('74.125.'):
+            intelligence.update({
+                'organization': 'Google LLC (Gmail)',
+                'category': 'email_service', 
+                'is_suspicious': False
+            })
+        elif ip_address.startswith('50.63.'):
+            intelligence.update({
+                'organization': 'Unknown Provider (50.63.x.x range)',
+                'category': 'unknown',
+                'is_suspicious': True  # Flag unknown ranges for investigation
+            })
+        
+        return intelligence
+    
     def migrate_existing_data(self, data_directory: str = "data"):
         """Migrate existing analysis files to database"""
         import glob

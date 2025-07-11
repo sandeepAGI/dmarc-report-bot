@@ -138,7 +138,14 @@ DOMAINS REQUIRING ATTENTION
 📊 Authentication Rate: {auth_rate:.1f}% ({successful_messages:,}/{total_messages:,} messages)
 📈 Historical Trend: {historical_comparison['trend'].title()} ({historical_comparison['change']:+.1f}% vs 30-day avg)
 ⏰ Report Period: {report['raw_data']['metadata']['date_range']['begin']} to {report['raw_data']['metadata']['date_range']['end']}
-
+"""
+            
+            # Add detailed failure analysis if failures exist
+            failure_details = self._get_detailed_failure_analysis(report)
+            if failure_details:
+                body += f"\n{failure_details}\n"
+            
+            body += f"""
 🔍 ANALYSIS & RECOMMENDATIONS:
 {self._extract_recommendations(report['claude_analysis'])}
 
@@ -205,10 +212,15 @@ DOMAIN STATUS
             historical_comparison = self.db.compare_with_historical(domain, auth_rate)
             trend_emoji = "📈" if historical_comparison['trend'] == 'improved' else "📊" if historical_comparison['trend'] == 'stable' else "📉"
             
+            # Get last failure date for historical context
+            last_failure_date = self.db.get_last_failure_date(domain)
+            failure_context = f"   🛡️ No failures detected since {last_failure_date}" if last_failure_date else "   🛡️ No failures detected in monitoring history"
+            
             body += f"""
 ✅ {domain} (reported by {org_name})
    📊 Authentication Rate: {auth_rate:.1f}% ({successful_messages:,}/{total_messages:,} messages)
    {trend_emoji} Trend: {historical_comparison['trend'].title()} ({historical_comparison['change']:+.1f}% vs 30-day avg)
+{failure_context}
 
 """
         
@@ -267,6 +279,72 @@ RECENT ACTIVITY
             'has_issues': False,
             'no_reports': True
         }
+    
+    def _get_detailed_failure_analysis(self, report: Dict) -> str:
+        """Generate detailed failure analysis for reports with authentication issues"""
+        domain = report['raw_data']['policy']['domain']
+        db_report_id = report.get('db_report_id')
+        
+        if not db_report_id:
+            return ""
+        
+        # Get failure details from database
+        failure_details = self.db.get_failure_details(domain, db_report_id)
+        
+        if not failure_details:
+            return ""
+        
+        failure_analysis = "🔍 DETAILED FAILURE ANALYSIS:\n\n"
+        failure_analysis += "  Failed Authentication Details:\n"
+        
+        total_failed_messages = sum(detail['count'] for detail in failure_details)
+        failure_analysis += f"  • {len(failure_details)} IP(s) with {total_failed_messages} failed message(s)\n\n"
+        
+        # Group failures and add IP intelligence
+        for detail in failure_details:
+            ip = detail['source_ip']
+            count = detail['count']
+            dkim_status = "❌ FAIL" if detail['dkim_result'] != 'pass' else "✅ PASS"
+            spf_status = "❌ FAIL" if detail['spf_result'] != 'pass' else "✅ PASS"
+            
+            # Get IP intelligence
+            ip_intel = self.db.get_ip_intelligence(ip)
+            org_info = ip_intel['organization']
+            
+            # Add warning for suspicious IPs
+            warning = " ⚠️ INVESTIGATE" if ip_intel['is_suspicious'] else ""
+            
+            failure_analysis += f"  • {ip}: {count} message(s) - DKIM {dkim_status}, SPF {spf_status}\n"
+            failure_analysis += f"    └─ {org_info}{warning}\n"
+        
+        # Add actionable recommendations based on failure patterns
+        failure_analysis += "\n  📋 RECOMMENDED ACTIONS:\n"
+        
+        # Check if all failures are from same IP range
+        ip_prefixes = set('.'.join(detail['source_ip'].split('.')[0:2]) for detail in failure_details)
+        if len(ip_prefixes) == 1:
+            prefix = list(ip_prefixes)[0] + ".x.x"
+            failure_analysis += f"  1. **Investigate IP range {prefix}:** All failures from same subnet\n"
+        else:
+            failure_analysis += f"  1. **Investigate {len(failure_details)} different IP sources:** Multiple failure points detected\n"
+        
+        # Check failure types
+        dkim_failures = [d for d in failure_details if d['dkim_result'] != 'pass']
+        spf_failures = [d for d in failure_details if d['spf_result'] != 'pass']
+        
+        if dkim_failures:
+            failure_analysis += f"  2. **DKIM Issues:** {len(dkim_failures)} IP(s) failing DKIM - check signing configuration\n"
+        if spf_failures:
+            failure_analysis += f"  3. **SPF Issues:** {len(spf_failures)} IP(s) failing SPF - verify authorized senders\n"
+        
+        # Add specific investigation steps
+        failure_analysis += f"  4. **Verification Steps:**\n"
+        failure_analysis += f"     - Check SPF record: dig TXT {domain} | grep spf\n"
+        failure_analysis += f"     - Verify these IPs are legitimate senders for {domain}\n"
+        failure_analysis += f"     - If legitimate: update SPF record and configure DKIM\n"
+        failure_analysis += f"     - If malicious: consider abuse reporting\n"
+        
+        return failure_analysis
     
     def _extract_recommendations(self, claude_analysis: str) -> str:
         """Extract and format recommendations from Claude analysis"""
