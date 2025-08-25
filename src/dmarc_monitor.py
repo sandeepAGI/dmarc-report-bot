@@ -397,7 +397,7 @@ class ClaudeAnalyzer:
     def analyze_dmarc_report(self, parsed_report):
         """Send DMARC report to Claude for analysis"""
         prompt = f"""
-Please analyze this DMARC report and provide a clear, actionable summary:
+Please analyze this DMARC report and provide a clear, actionable summary for a small business owner without IT staff:
 
 REPORT METADATA:
 - Organization: {parsed_report['metadata']['org_name']}
@@ -416,11 +416,20 @@ RECORDS:
 Please provide:
 1. **Overall Status**: Pass/fail summary and key metrics
 2. **Authentication Results**: DKIM and SPF performance 
-3. **Source Analysis**: New or suspicious IP addresses
-4. **Issues Found**: Any authentication failures or policy violations
-5. **Recommendations**: Actions to take if any problems are detected
+3. **IP Investigation**: For each IP address, identify:
+   - Who owns it (Google, Microsoft, AWS, suspicious sources, etc.)
+   - Whether it's likely legitimate or suspicious
+   - If it's a known email service (Gmail, Office 365, MailChimp, SendGrid, etc.)
+   - Specific action needed (add to SPF, investigate further, block, etc.)
+4. **Issues Found**: Any authentication failures or policy violations IN PLAIN ENGLISH
+5. **DIY Recommendations**: Step-by-step actions the business owner can take themselves:
+   - Specific DNS records to add/modify
+   - Which service providers to contact
+   - What settings to check in their email service
+   - Red flags that require immediate attention
 
-Keep the analysis concise but thorough, focusing on actionable insights.
+Focus on actionable insights a non-technical person can understand and implement.
+For each failed IP, explain WHO it likely is and WHAT to do about it.
 """
 
         headers = {
@@ -440,23 +449,142 @@ Keep the analysis concise but thorough, focusing on actionable insights.
             ]
         }
         
-        try:
-            response = requests.post(
-                'https://api.anthropic.com/v1/messages',
-                headers=headers,
-                json=data,
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                return response.json()['content'][0]['text']
-            else:
-                logger.error(f"Claude API error: {response.status_code} - {response.text}")
-                return f"Error analyzing report: {response.status_code}"
+        # Retry logic with exponential backoff
+        max_retries = 3
+        retry_delays = [2, 4, 8]  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(
+                    'https://api.anthropic.com/v1/messages',
+                    headers=headers,
+                    json=data,
+                    timeout=45  # Increased timeout to 45 seconds
+                )
                 
-        except Exception as e:
-            logger.error(f"Error calling Claude API: {e}")
-            return f"Error analyzing report: {str(e)}"
+                if response.status_code == 200:
+                    return response.json()['content'][0]['text']
+                elif response.status_code == 429:  # Rate limit
+                    if attempt < max_retries - 1:
+                        delay = retry_delays[attempt]
+                        logger.warning(f"Rate limited by Claude API, retrying in {delay} seconds...")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        logger.error(f"Claude API rate limit exceeded after {max_retries} attempts")
+                        return self._get_fallback_analysis(parsed_report)
+                else:
+                    logger.error(f"Claude API error: {response.status_code} - {response.text}")
+                    if attempt < max_retries - 1:
+                        delay = retry_delays[attempt]
+                        logger.info(f"Retrying Claude API call in {delay} seconds (attempt {attempt + 2}/{max_retries})...")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        return self._get_fallback_analysis(parsed_report)
+                        
+            except requests.exceptions.Timeout:
+                if attempt < max_retries - 1:
+                    delay = retry_delays[attempt]
+                    logger.warning(f"Claude API timeout, retrying in {delay} seconds (attempt {attempt + 2}/{max_retries})...")
+                    time.sleep(delay)
+                    continue
+                else:
+                    logger.error(f"Claude API timeout after {max_retries} attempts")
+                    return self._get_fallback_analysis(parsed_report)
+                    
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    delay = retry_delays[attempt]
+                    logger.warning(f"Error calling Claude API: {e}, retrying in {delay} seconds...")
+                    time.sleep(delay)
+                    continue
+                else:
+                    logger.error(f"Error calling Claude API after {max_retries} attempts: {e}")
+                    return self._get_fallback_analysis(parsed_report)
+        
+        # Should not reach here, but just in case
+        return self._get_fallback_analysis(parsed_report)
+    
+    def _get_fallback_analysis(self, parsed_report):
+        """Provide basic analysis when Claude API is unavailable"""
+        logger.info("Using fallback analysis due to Claude API unavailability")
+        
+        domain = parsed_report['policy']['domain']
+        total_messages = sum(record['count'] for record in parsed_report['records'])
+        failed_messages = sum(
+            record['count'] for record in parsed_report['records']
+            if record['dkim'] != 'pass' or record['spf'] != 'pass'
+        )
+        auth_rate = ((total_messages - failed_messages) / total_messages * 100) if total_messages > 0 else 100
+        
+        # Identify failed IPs
+        failed_ips = []
+        for record in parsed_report['records']:
+            if record['dkim'] != 'pass' or record['spf'] != 'pass':
+                failed_ips.append({
+                    'ip': record['source_ip'],
+                    'count': record['count'],
+                    'dkim': record['dkim'],
+                    'spf': record['spf']
+                })
+        
+        # Build fallback analysis
+        analysis = f"""
+**Overall Status**: {'✅ PASS' if auth_rate >= 95 else '⚠️ NEEDS ATTENTION' if auth_rate >= 80 else '❌ CRITICAL'}
+- Authentication Rate: {auth_rate:.1f}% ({total_messages - failed_messages}/{total_messages} messages)
+- Domain: {domain}
+- Report Period: {parsed_report['metadata']['date_range']['begin']} to {parsed_report['metadata']['date_range']['end']}
+
+**Authentication Results**:
+- Total Messages: {total_messages}
+- Passed: {total_messages - failed_messages}
+- Failed: {failed_messages}
+"""
+        
+        if failed_ips:
+            analysis += "\n**IP Investigation**: (AI analysis unavailable - showing raw data)\n"
+            for ip_info in failed_ips[:5]:  # Show top 5 failed IPs
+                analysis += f"- {ip_info['ip']}: {ip_info['count']} messages"
+                analysis += f" (DKIM: {ip_info['dkim']}, SPF: {ip_info['spf']})\n"
+                
+                # Basic IP identification
+                if '209.85.' in ip_info['ip'] or '172.217.' in ip_info['ip']:
+                    analysis += "  → Likely Google/Gmail server\n"
+                elif '40.107.' in ip_info['ip'] or '52.96.' in ip_info['ip']:
+                    analysis += "  → Likely Microsoft/Office 365 server\n"
+                elif '35.' in ip_info['ip'] or '52.' in ip_info['ip'] or '54.' in ip_info['ip']:
+                    analysis += "  → Likely AWS server (check if you use email services)\n"
+                else:
+                    analysis += "  → Unknown provider (investigate further)\n"
+        
+        analysis += """
+**Issues Found**: """ + ('None detected' if auth_rate >= 95 else f'{failed_messages} messages failed authentication')
+        
+        analysis += """
+
+**DIY Recommendations**:
+"""
+        if auth_rate < 95:
+            if any(ip['spf'] != 'pass' for ip in failed_ips):
+                analysis += """1. Fix SPF Record:
+   - Log into your domain registrar
+   - Add missing senders to your SPF record
+   - For Google: add "include:_spf.google.com"
+   - For Microsoft: add "include:spf.protection.outlook.com"
+"""
+            if any(ip['dkim'] != 'pass' for ip in failed_ips):
+                analysis += """2. Fix DKIM Signing:
+   - Check your email service admin panel
+   - Enable DKIM signing for your domain
+   - Add DKIM records to your DNS
+"""
+        else:
+            analysis += "- Your email authentication is working well\n- Continue monitoring for any changes"
+        
+        analysis += "\n\n⚠️ Note: AI-powered analysis was unavailable for this report. Showing basic analysis only."
+        
+        return analysis
 
 def get_last_run_time():
     """Get the timestamp of the last successful run"""

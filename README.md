@@ -20,9 +20,17 @@ Automatically monitors Outlook for DMARC reports and analyzes them using Claude 
 - **Clean Status Emails** - Confirmation emails when no issues are detected
 - **Automatic Issue Detection** - Identifies authentication failures, suspicious IPs, and policy violations
 - **Context-Aware Analysis** - Improved keyword detection prevents false positives for domains with perfect scores
-- **🆕 Detailed Failure Analysis** - Specific IP addresses, message counts, and failure types with actionable recommendations
-- **🆕 IP Intelligence** - Identifies legitimate email providers vs. suspicious sources requiring investigation
-- **🆕 Historical Failure Context** - Clean reports show "No failures since X" for confidence building
+- **Detailed Failure Analysis** - Specific IP addresses, message counts, and failure types with actionable recommendations
+- **IP Intelligence** - Identifies legitimate email providers vs. suspicious sources requiring investigation
+- **Historical Failure Context** - Clean reports show "No failures since X" for confidence building
+- **🆕 Non-Technical Reporting (Aug 2025)** - Plain English explanations designed for small businesses without IT staff
+- **🆕 Risk-Based Priority System** - CRITICAL/HIGH/MODERATE/LOW risk levels with color coding
+- **🆕 Enhanced IP Investigation** - Claude AI identifies each IP (Google, Microsoft, AWS, etc.) with specific fix instructions
+- **🆕 DIY Action Steps** - Step-by-step instructions for fixing issues yourself (DNS changes, email settings)
+- **🆕 Business Impact Analysis** - Clear explanations of what failures mean for your business operations
+- **🆕 API Retry Logic** - Automatic retry (3 attempts with exponential backoff) when Claude API fails
+- **🆕 Fallback Analysis** - Basic analysis still provided when AI is completely unavailable
+- **🆕 Improved Reliability** - Increased timeout (30s→45s) and better error handling
 
 ### 🚀 Phase 3 (Future Enhancements)
 - **Web Dashboard** - Visual trends and historical data with charts and graphs
@@ -55,14 +63,17 @@ Automatically monitors Outlook for DMARC reports and analyzes them using Claude 
 │   ├── config.json.template    # Safe template (committed)
 │   └── config.json             # Your secrets (gitignored)
 ├── src/
-│   ├── dmarc_monitor.py        # Main application (Phase 2 enhanced)
+│   ├── dmarc_monitor.py        # Main application (enhanced with IP investigation)
 │   ├── database.py             # SQLite database management (Phase 2)
-│   └── enhanced_reporting.py   # Intelligent reporting system (Phase 2)
+│   ├── enhanced_reporting.py   # Intelligent reporting system (with hybrid format)
+│   └── non_technical_formatter.py # Plain English formatter for small businesses (NEW)
 ├── scripts/
 │   ├── setup.py                      # Configuration setup
 │   ├── retry_if_failed.py            # Retry logic for cron
 │   ├── test_phase2.py                # Phase 2 test suite
 │   ├── test_enhanced_failures.py     # Enhanced failure details unit tests
+│   ├── test_enhanced_reporting.py    # Non-technical reporting test suite (NEW)
+│   ├── test_retry_logic.py           # API retry and fallback test suite (NEW)
 │   ├── test_end_to_end.py            # End-to-end integration test
 │   └── database_maintenance.py       # Database maintenance utility
 ├── logs/                       # Execution logs
@@ -317,10 +328,74 @@ python src/dmarc_monitor.py
 
 ## Output Examples
 
-### Phase 2 Enhanced Reports
+### Phase 2 Enhanced Reports (Now with Non-Technical Format)
 
-#### Issues Detected Report (when problems found)
+#### NEW: Enhanced Report with Plain English (Aug 2025)
+
+```text
+🚨 DMARC SECURITY REPORT - 2025-08-25 10:15:23
+============================================================
+
+🟠 OVERALL RISK LEVEL: HIGH
+Action needed this week - Significant security gaps
+
+QUICK SUMMARY FOR BUSINESS OWNER
+============================================================
+📊 Checked: 2 domain reports (81 emails)
+⚠️ Problems Found: 1 domain with issues
+✅ Working Well: 1 domain without issues
+📈 Overall Security Score: 73.3%
+
+WHAT THIS MEANS FOR YOUR BUSINESS
+============================================================
+⚠️ HIGH: 22 emails (27%) at risk of spam filtering
+📧 Important emails may end up in spam folders
+🔍 Recipients becoming suspicious of legitimate emails
+📉 Declining email reputation affecting deliverability
+
+1. training.aileron-group.com 🟠 HIGH RISK
+--------------------------------------------------
+
+🔍 PLAIN ENGLISH EXPLANATION
+----------------------------------------
+🎉 Analyzed 81 emails sent using your company name
+⚠️ 73.3% passed security verification
+🔍 22 emails couldn't be verified as legitimate
+📍 Found 4 different sources of concern
+
+🔎 WHO'S SENDING FAILED EMAILS?
+----------------------------------------
+📍 Google Gmail Server (209.85.220.41)
+   Status: Legitimate Google server but not authorized in your SPF
+   Action: ADD to SPF: "include:_spf.google.com" in your DNS records
+   Confidence: 95% legitimate - Google's official servers
+
+📍 Amazon AWS Server (35.174.145.124)
+   Status: Could be legitimate service OR suspicious
+   Action: CHECK: Do you use MailChimp, SendGrid, or similar?
+   If YES → Add their SPF records
+   If NO → Monitor for spoofing attempts
+
+🛠️ HOW TO FIX THESE ISSUES
+----------------------------------------
+📝 FIX YOUR SPF RECORD (Authorized Senders List):
+   1. Log into your domain registrar (GoDaddy, Namecheap, etc.)
+   2. Go to DNS Management / DNS Settings
+   3. Find the TXT record that starts with "v=spf1"
+   4. Add: "include:_spf.google.com" for Gmail
+   5. Save changes (may take 1-24 hours to take effect)
+
+🎯 ACTION SUMMARY - WHAT TO DO NOW
+============================================================
+1. Review each domain's risk level above
+2. For HIGH risks: Take action TODAY
+3. Follow the step-by-step DIY instructions provided
+4. Save this report for your records
 ```
+
+#### Legacy Technical Report Format (still included below plain English)
+
+```text
 🚨 DMARC ISSUES DETECTED - 2025-07-11 10:15:23
 ============================================================
 
@@ -432,6 +507,7 @@ DETAILED ANALYSIS
 ```
 
 ### Retry Script Behavior
+
 ```bash
 # If morning job succeeded:
 ✅ Morning job completed successfully at 10:15
@@ -443,6 +519,31 @@ DETAILED ANALYSIS
 # If no morning job detected:
 ❓ No morning job detected today
 🚀 Running DMARC monitor retry...
+```
+
+### API Reliability Features (NEW Aug 2025)
+
+The system now includes robust error handling for Claude API failures:
+
+#### Automatic Retry Logic
+- **3 retry attempts** with exponential backoff (2s, 4s, 8s delays)
+- **Handles timeouts** - Increased timeout from 30s to 45s
+- **Rate limit handling** - Automatically backs off when rate limited
+- **Clear logging** - Shows retry attempts and reasons in logs
+
+#### Fallback Analysis
+When Claude API is completely unavailable after all retries:
+- **Basic analysis provided** - Authentication rates, pass/fail status
+- **IP identification** - Basic detection of Google/Microsoft/AWS servers
+- **DIY recommendations** - Still provides actionable steps based on failures
+- **Clear notification** - Report indicates AI analysis was unavailable
+
+Example log output with retry:
+```
+2025-08-25 12:32:37 - WARNING - Claude API timeout, retrying in 2 seconds (attempt 2/3)...
+2025-08-25 12:32:41 - WARNING - Claude API timeout, retrying in 4 seconds (attempt 3/3)...
+2025-08-25 12:32:47 - ERROR - Claude API timeout after 3 attempts
+2025-08-25 12:32:47 - INFO - Using fallback analysis due to Claude API unavailability
 ```
 
 ## How It Works
@@ -750,16 +851,29 @@ ip_intel = db.get_ip_intelligence('50.63.9.60')
 ```
 
 ### New Files Created
+
 - `src/database.py` - Database management system with auto-purging and enhanced failure analysis
-- `src/enhanced_reporting.py` - Intelligent reporting engine with detailed failure breakdown
+- `src/enhanced_reporting.py` - Intelligent reporting engine with detailed failure breakdown and non-technical format
+- `src/non_technical_formatter.py` - Plain English formatter for small businesses (Aug 2025)
 - `scripts/test_phase2.py` - Comprehensive test suite for Phase 2 features
 - `scripts/test_enhanced_failures.py` - Unit tests for enhanced failure details functionality
+- `scripts/test_enhanced_reporting.py` - Test suite for non-technical reporting features (Aug 2025)
+- `scripts/test_retry_logic.py` - Test suite for API retry and fallback analysis (Aug 2025)
 - `scripts/test_end_to_end.py` - End-to-end integration test demonstrating new features
 - `scripts/database_maintenance.py` - Database maintenance utility
 - `data/dmarc_monitor.db` - SQLite database (auto-created)
 - `data/migration_completed.txt` - Migration status tracker
 
 ### Recent Improvements
+
+#### Non-Technical Reporting & API Reliability (August 2025)
+- **Plain English Reports**: All technical terms explained for small business owners
+- **Risk-Based Priority System**: CRITICAL/HIGH/MODERATE/LOW risk levels with clear business impact
+- **Enhanced IP Investigation**: Claude AI identifies each IP (Google, Microsoft, AWS, etc.) with specific actions
+- **DIY Action Steps**: Step-by-step DNS and email configuration instructions
+- **API Retry Logic**: 3 retry attempts with exponential backoff when Claude API fails
+- **Fallback Analysis**: Basic analysis provided when AI is completely unavailable
+- **Improved Reliability**: Increased timeout (30s→45s) and comprehensive error handling
 
 #### Enhanced Failure Details (July 2025)
 - **Detailed Failure Analysis**: Reports now include specific IP addresses, message counts, and failure types (DKIM/SPF) for actionable troubleshooting

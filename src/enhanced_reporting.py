@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
 Enhanced Reporting Module for DMARC Monitor - Phase 2
-Provides smart alerting and issue-focused reporting
+Provides smart alerting and issue-focused reporting with non-technical explanations
 """
 
 from datetime import datetime
 from typing import Dict, List, Optional
 import logging
+from non_technical_formatter import NonTechnicalFormatter
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +17,7 @@ class EnhancedReporter:
         self.config = config
         self.db = database
         self.thresholds = config.get('thresholds', {})
+        self.formatter = NonTechnicalFormatter()
     
     def generate_smart_report(self, analyzed_reports: List[Dict]) -> Dict:
         """Generate intelligent report based on issues and thresholds"""
@@ -93,27 +95,38 @@ class EnhancedReporter:
         return False
     
     def _create_issues_report(self, issues_reports: List[Dict], clean_reports: List[Dict]) -> Dict:
-        """Create detailed report focusing on issues"""
+        """Create detailed report focusing on issues with hybrid format"""
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         total_reports = len(issues_reports) + len(clean_reports)
         
         # Get summary stats
         summary_stats = self.db.get_summary_stats()
         
-        subject = f"{self.config['notifications']['email_subject_prefix']} ⚠️ Issues Detected - {len(issues_reports)} domains need attention"
+        # Calculate overall risk level
+        avg_auth_rate = summary_stats['avg_auth_rate']
+        risk_level, risk_icon, risk_desc = self.formatter.get_risk_level(float(avg_auth_rate))
+        
+        subject = f"{self.config['notifications']['email_subject_prefix']} {risk_icon} {risk_level} Risk - {len(issues_reports)} domains need attention"
         
         body = f"""
-🚨 DMARC ISSUES DETECTED - {timestamp}
+🚨 DMARC SECURITY REPORT - {timestamp}
 {'=' * 60}
 
-EXECUTIVE SUMMARY
-• Total Reports Analyzed: {total_reports}
-• Reports with Issues: {len(issues_reports)}
-• Clean Reports: {len(clean_reports)}
-• Total Email Messages: {summary_stats['total_messages']:,}
-• Average Authentication Rate: {summary_stats['avg_auth_rate']}%
+{risk_icon} OVERALL RISK LEVEL: {risk_level}
+{risk_desc}
 
-DOMAINS REQUIRING ATTENTION
+QUICK SUMMARY FOR BUSINESS OWNER
+{'=' * 60}
+📊 Checked: {total_reports} domain reports ({summary_stats['total_messages']:,} emails)
+⚠️ Problems Found: {len(issues_reports)} domains with issues
+✅ Working Well: {len(clean_reports)} domains without issues
+📈 Overall Security Score: {summary_stats['avg_auth_rate']}%
+
+WHAT THIS MEANS FOR YOUR BUSINESS
+{'=' * 60}
+{self.formatter.get_business_impact(float(avg_auth_rate), summary_stats['total_messages'])}
+
+DOMAINS REQUIRING YOUR ATTENTION
 {'=' * 60}
 """
         
@@ -132,29 +145,50 @@ DOMAINS REQUIRING ATTENTION
             
             historical_comparison = self.db.compare_with_historical(domain, auth_rate)
             
+            # Get risk level for this specific domain
+            domain_risk_level, domain_risk_icon, domain_risk_desc = self.formatter.get_risk_level(auth_rate)
+            
             body += f"""
-{i}. {domain} (reported by {org_name})
+{i}. {domain} (reported by {org_name}) {domain_risk_icon} {domain_risk_level} RISK
 {'-' * 50}
-📊 Authentication Rate: {auth_rate:.1f}% ({successful_messages:,}/{total_messages:,} messages)
-📈 Historical Trend: {historical_comparison['trend'].title()} ({historical_comparison['change']:+.1f}% vs 30-day avg)
-⏰ Report Period: {report['raw_data']['metadata']['date_range']['begin']} to {report['raw_data']['metadata']['date_range']['end']}
+
+📊 QUICK STATS:
+• Security Score: {auth_rate:.1f}% ({successful_messages:,} passed / {total_messages:,} total emails)
+• Trend: {historical_comparison['trend'].title()} ({historical_comparison['change']:+.1f}% vs last month)
+• Period: {report['raw_data']['metadata']['date_range']['begin']} to {report['raw_data']['metadata']['date_range']['end']}
 """
             
-            # Add detailed failure analysis if failures exist
-            failure_details = self._get_detailed_failure_analysis(report)
-            if failure_details:
-                body += f"\n{failure_details}\n"
+            # Add hybrid analysis section
+            db_report_id = report.get('db_report_id')
+            if db_report_id:
+                failure_details = self.db.get_failure_details(domain, db_report_id)
+                if failure_details:
+                    # Add enhanced failure details with IP intelligence
+                    for detail in failure_details:
+                        # Enhance with organization info
+                        ip_intel = self.db.get_ip_intelligence(detail['source_ip'])
+                        detail['org_info'] = ip_intel['organization']
+                    
+                    hybrid_section = self.formatter.create_hybrid_report_section(
+                        domain, 
+                        report['raw_data'],
+                        failure_details
+                    )
+                    body += f"\n{hybrid_section}\n"
             
+            # Add Claude's enhanced analysis
             body += f"""
-🔍 ANALYSIS & RECOMMENDATIONS:
-{self._extract_recommendations(report['claude_analysis'])}
+
+📋 TECHNICAL ANALYSIS FROM AI:
+{'-' * 40}
+{self._extract_enhanced_recommendations(report['claude_analysis'])}
 
 """
         
         # Add clean domains summary
         if clean_reports:
             body += f"""
-✅ CLEAN DOMAINS ({len(clean_reports)} domains)
+✅ DOMAINS WORKING WELL ({len(clean_reports)} domains)
 {'=' * 60}
 The following domains showed no significant issues:
 """
@@ -163,11 +197,27 @@ The following domains showed no significant issues:
                 total_messages = sum(record['count'] for record in report['raw_data']['records'])
                 body += f"• {domain}: {total_messages:,} messages processed successfully\n"
         
+        # Add action summary
         body += f"""
+
+🎯 ACTION SUMMARY - WHAT TO DO NOW
+{'=' * 60}
+1. Review each domain's risk level above
+2. For HIGH/CRITICAL risks: Take action TODAY
+3. For MODERATE risks: Schedule fixes this week
+4. Follow the step-by-step DIY instructions provided
+5. Save this report for your records
+
+Need help? Options:
+• Follow the DIY steps above (most issues can be self-resolved)
+• Contact your domain registrar's support (GoDaddy, Namecheap, etc.)
+• Forward to a tech-savvy friend or consultant
+• Search online for: "[Your email provider] DKIM SPF setup guide"
 
 {'=' * 60}
 📧 Report generated by DMARC Monitor at {timestamp}
-🤖 Analysis powered by Claude AI with intelligent thresholds
+🤖 Enhanced analysis with plain English explanations
+💡 Designed for small businesses without IT departments
 """
         
         return {
@@ -182,19 +232,27 @@ The following domains showed no significant issues:
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         summary_stats = self.db.get_summary_stats()
         
-        subject = f"{self.config['notifications']['email_subject_prefix']} ✅ All Clear - No Issues Detected"
+        subject = f"{self.config['notifications']['email_subject_prefix']} ✅ All Clear - Email Security Working Well"
         
         body = f"""
-✅ ALL SYSTEMS HEALTHY - {timestamp}
+✅ GOOD NEWS - YOUR EMAIL SECURITY IS WORKING! - {timestamp}
 {'=' * 60}
 
-EXECUTIVE SUMMARY
-• Total Reports Analyzed: {len(clean_reports)}
-• All domains performing well
-• Total Email Messages: {summary_stats['total_messages']:,}
-• Average Authentication Rate: {summary_stats['avg_auth_rate']}%
+PLAIN ENGLISH SUMMARY
+{'=' * 60}
+🎉 Great news! Your email security passed all checks.
+📧 We verified {summary_stats['total_messages']:,} emails from your domain(s)
+✅ {summary_stats['avg_auth_rate']}% passed authentication (excellent!)
+🛡️ Your emails are being delivered properly and protected from spoofing
 
-DOMAIN STATUS
+WHAT THIS MEANS FOR YOUR BUSINESS
+{'=' * 60}
+• ✅ Your legitimate emails are reaching customers
+• ✅ Your domain is protected from email spoofing
+• ✅ Email providers (Gmail, Outlook) trust your domain
+• ✅ No immediate action required
+
+YOUR DOMAINS - ALL PERFORMING WELL
 {'=' * 60}
 """
         
@@ -225,12 +283,24 @@ DOMAIN STATUS
 """
         
         body += f"""
-{'=' * 60}
-🛡️  All DMARC policies are working effectively
-🎯 No action required at this time
-📧 Report generated by DMARC Monitor at {timestamp}
 
-Next scheduled check: As per your cron configuration
+RECOMMENDATIONS FOR CONTINUED SUCCESS
+{'=' * 60}
+Even though everything looks good, here are best practices:
+
+1. 📅 Keep monitoring these reports weekly
+2. 📝 Document any new email services you start using
+3. 🔄 If you add new email tools (marketing, CRM), update your SPF record
+4. 💾 Save these reports for your records
+5. 📈 Consider strengthening your DMARC policy from 'none' to 'quarantine' 
+   (This provides even better protection - consult documentation when ready)
+
+{'=' * 60}
+📧 Report generated by DMARC Monitor at {timestamp}
+🤖 Enhanced analysis for small businesses
+💚 Your email security is in good shape!
+
+Next scheduled check: Tomorrow at 10 AM (or as configured)
 """
         
         return {
@@ -373,6 +443,28 @@ RECENT ACTIVITY
         key_lines = [line.strip() for line in lines if any(keyword in line.lower() 
                     for keyword in ['pass', 'fail', 'issue', 'recommend', 'should', 'update'])]
         return '\n'.join(f"  • {line}" for line in key_lines[-3:]) if key_lines else "See detailed analysis above."
+    
+    def _extract_enhanced_recommendations(self, claude_analysis: str) -> str:
+        """Extract and format Claude's enhanced analysis with IP investigations"""
+        # Claude's analysis should now include IP investigations and DIY steps
+        # Just format it nicely for display
+        lines = claude_analysis.split('\n')
+        formatted_lines = []
+        
+        for line in lines:
+            line = line.strip()
+            if line:
+                # Keep headers as-is
+                if line.startswith('**') and line.endswith('**'):
+                    formatted_lines.append(line)
+                # Format list items
+                elif line.startswith(('•', '-', '*', '1.', '2.', '3.', '4.', '5.')):
+                    formatted_lines.append(f"  {line}")
+                # Regular lines
+                else:
+                    formatted_lines.append(line)
+        
+        return '\n'.join(formatted_lines) if formatted_lines else claude_analysis
     
     def should_send_report(self, report_data: Optional[Dict]) -> bool:
         """Determine if a report should be sent based on configuration"""
