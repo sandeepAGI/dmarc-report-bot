@@ -31,6 +31,10 @@ Automatically monitors Outlook for DMARC reports and analyzes them using Claude 
 - **🆕 API Retry Logic** - Automatic retry (3 attempts with exponential backoff) when Claude API fails
 - **🆕 Fallback Analysis** - Basic analysis still provided when AI is completely unavailable
 - **🆕 Improved Reliability** - Increased timeout (30s→45s) and better error handling
+- **🔧 Automatic Email Organization (Nov 2025)** - Processed reports automatically moved to "DMARC Processed" folder
+- **🔧 Multi-Mailbox Support (Nov 2025)** - Configure which mailbox to monitor via `mailbox_account` setting
+- **🔧 Full Pagination Support (Nov 2025)** - Retrieves all messages regardless of volume (not limited to 10)
+- **🔧 Extended Lookback (Nov 2025)** - 72-hour default lookback covers weekends for Monday runs
 
 ### 🚀 Phase 3 (Future Enhancements)
 - **Web Dashboard** - Visual trends and historical data with charts and graphs
@@ -68,14 +72,18 @@ Automatically monitors Outlook for DMARC reports and analyzes them using Claude 
 │   ├── enhanced_reporting.py   # Intelligent reporting system (with hybrid format)
 │   └── non_technical_formatter.py # Plain English formatter for small businesses (NEW)
 ├── scripts/
-│   ├── setup.py                      # Configuration setup
-│   ├── retry_if_failed.py            # Retry logic for cron
-│   ├── test_phase2.py                # Phase 2 test suite
-│   ├── test_enhanced_failures.py     # Enhanced failure details unit tests
-│   ├── test_enhanced_reporting.py    # Non-technical reporting test suite (NEW)
-│   ├── test_retry_logic.py           # API retry and fallback test suite (NEW)
-│   ├── test_end_to_end.py            # End-to-end integration test
-│   └── database_maintenance.py       # Database maintenance utility
+│   ├── setup.py                         # Configuration setup
+│   ├── retry_if_failed.py               # Retry logic for cron
+│   ├── test_phase2.py                   # Phase 2 test suite
+│   ├── test_enhanced_failures.py        # Enhanced failure details unit tests
+│   ├── test_enhanced_reporting.py       # Non-technical reporting test suite
+│   ├── test_retry_logic.py              # API retry and fallback test suite
+│   ├── test_end_to_end.py               # End-to-end integration test
+│   ├── test_fixed_authentication.py     # Verify correct mailbox authentication (NEW)
+│   ├── catchup_backlog.py               # Process historical backlog with safety checks (NEW)
+│   ├── move_processed_emails.py         # Bulk move processed emails to archive folder (NEW)
+│   ├── generate_historical_report.py    # Query database for historical analysis (NEW)
+│   └── database_maintenance.py          # Database maintenance utility
 ├── logs/                       # Execution logs
 │   └── dmarc_monitor.log
 └── data/                       # Analysis results & tracking
@@ -131,23 +139,45 @@ Edit `config/config.json` with your credentials:
 {
   "microsoft": {
     "client_id": "your-azure-app-id",
-    "client_secret": "your-azure-client-secret", 
-    "tenant_id": "your-azure-tenant-id"
+    "client_secret": "your-azure-client-secret",
+    "tenant_id": "your-azure-tenant-id",
+    "redirect_uri": "http://localhost:8080/callback"
   },
   "claude": {
-    "api_key": "your-claude-api-key"
+    "api_key": "your-claude-api-key",
+    "model": "claude-sonnet-4-20250514"
+  },
+  "email": {
+    "mailbox_account": "email@domain.com",      // ⚠️ IMPORTANT: Mailbox where DMARC reports are delivered
+    "folder_name": "DMARC Reports",
+    "processed_folder": "DMARC Processed",      // Processed reports moved here automatically
+    "lookback_hours": 72,                       // Covers weekends for Monday runs
+    "max_lookback_hours": 168                   // 7 days for extended outages
   },
   "notifications": {
-    "email_to": "your-email@domain.com"
+    "email_results": true,
+    "email_to": "your-email@domain.com",
+    "email_subject_prefix": "[DMARC Analysis]",
+    "quiet_mode": true
   }
 }
 ```
 
+**Important Configuration Notes:**
+- `mailbox_account`: Must be the email address where DMARC reports are delivered (may differ from notification email)
+- `processed_folder`: Reports automatically moved here after processing (keeps inbox clean)
+- `lookback_hours`: 72h default covers weekends; system calculates actual time since last run
+- `max_lookback_hours`: Maximum lookback period for extended outages
+
 ### 6. Set Up Outlook Folders
-1. Open Outlook → Create folder **"DMARC Reports"**
-2. Set up email rule to move DMARC reports to this folder:
+1. Open Outlook → Create folders:
+   - **"DMARC Reports"** - Incoming reports land here
+   - **"DMARC Processed"** - Processed reports automatically moved here
+2. Set up email rule to move DMARC reports to "DMARC Reports" folder:
    - **Condition**: Subject contains "DMARC" OR from domain contains your domain
    - **Action**: Move to "DMARC Reports" folder
+
+**Note**: The system will automatically move processed reports from "DMARC Reports" to "DMARC Processed" after analysis, keeping your inbox organized.
 
 ### 7. First Run & Authentication
 ```bash
@@ -210,8 +240,10 @@ cat ~/utilities/dmarc-monitor/data/last_successful_run.txt
     "model": "claude-sonnet-4-20250514"
   },
   "email": {
+    "mailbox_account": "member@domain.com",
     "folder_name": "DMARC Reports",
-    "lookback_hours": 24,
+    "processed_folder": "DMARC Processed",
+    "lookback_hours": 72,
     "max_lookback_hours": 168
   },
   "notifications": {
@@ -237,9 +269,11 @@ cat ~/utilities/dmarc-monitor/data/last_successful_run.txt
 ### Key Settings Explained
 
 #### Core Settings
+- **`mailbox_account`**: Email address where DMARC reports are delivered (forces authentication to correct mailbox)
+- **`processed_folder`**: Folder where processed reports are automatically moved after analysis
 - **`quiet_mode`**: `true` = no email when no reports found, `false` = always send status email
 - **`send_clean_status`**: `true` = send confirmation email when no issues detected
-- **`lookback_hours`**: Default hours to check on first run (24 hours)
+- **`lookback_hours`**: Default hours to check on first run (72 hours recommended to cover weekends)
 - **`max_lookback_hours`**: Maximum lookback to prevent overwhelming (168 = 7 days)
 - **`model`**: Claude model to use (`claude-sonnet-4-20250514` recommended)
 
@@ -253,6 +287,68 @@ cat ~/utilities/dmarc-monitor/data/last_successful_run.txt
 - **`retention_days`**: Number of days to keep historical data (default: 30)
 - **`auto_purge`**: Automatically purge old data when database grows large (default: true)
 - **`purge_on_startup`**: Force purge check on every startup (default: false)
+
+## Maintenance Utilities
+
+### Process Historical Backlog
+
+If reports have been accumulating unprocessed, use the catch-up script:
+
+```bash
+python scripts/catchup_backlog.py
+```
+
+This script will:
+- Safely backup your `last_successful_run.txt` timestamp
+- Process ALL reports in the "DMARC Reports" folder
+- Generate a consolidated report
+- Store all results in the database
+- Restore normal operations
+
+**Safety Features:**
+- Asks for confirmation before proceeding
+- Backs up state before processing
+- Can be interrupted with Ctrl+C (will restore backup)
+- Provides detailed progress output
+
+### Clean Up Processed Emails
+
+To move processed emails from "DMARC Reports" to "DMARC Processed":
+
+```bash
+python scripts/move_processed_emails.py
+```
+
+**Note:** The main script now does this automatically after each run. This utility is only needed for one-time cleanup of historical processed reports.
+
+### Generate Historical Analysis
+
+To view a consolidated report from your database:
+
+```bash
+python scripts/generate_historical_report.py
+```
+
+This generates a report showing:
+- Total reports processed and date range
+- Summary by domain
+- Authentication success rates
+- Reports with issues
+- Top failing IP addresses
+- Current DMARC policy analysis
+
+### Verify Authentication
+
+To test that authentication is working correctly:
+
+```bash
+python scripts/test_fixed_authentication.py
+```
+
+This will:
+- Confirm authentication to the correct mailbox (`mailbox_account`)
+- List accessible folders
+- Verify "DMARC Reports" and "DMARC Processed" folders are visible
 
 ## Team Setup Instructions
 

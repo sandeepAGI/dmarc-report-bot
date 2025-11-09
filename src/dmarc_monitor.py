@@ -83,8 +83,9 @@ def setup_logging(config):
 logger = setup_logging(CONFIG)
 
 class OutlookClient:
-    def __init__(self, config):
+    def __init__(self, config, email_config=None):
         self.config = config
+        self.email_config = email_config or {}
         self.access_token = None
         self.token_file = 'outlook_token.json'
         
@@ -124,6 +125,10 @@ class OutlookClient:
             'scope': 'https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access',
             'response_mode': 'query'
         }
+
+        # Add login_hint if mailbox_account is configured
+        if self.email_config.get('mailbox_account'):
+            params['login_hint'] = self.email_config['mailbox_account']
         
         auth_url_with_params = f"{auth_url}?{urllib.parse.urlencode(params)}"
         
@@ -272,16 +277,32 @@ class OutlookClient:
         # Get messages from last N hours
         cutoff_time = datetime.now() - timedelta(hours=hours_back)
         filter_query = f"receivedDateTime ge {cutoff_time.isoformat()}Z"
-        
+
         messages_url = f"https://graph.microsoft.com/v1.0/me/mailFolders/{folder_id}/messages"
         params = {
             '$filter': filter_query,
             '$select': 'id,subject,receivedDateTime,hasAttachments,from',
-            '$orderby': 'receivedDateTime desc'
+            '$orderby': 'receivedDateTime desc',
+            '$top': 999  # Request maximum per page
         }
-        
-        response = requests.get(messages_url, headers=headers, params=params)
-        return response.json().get('value', [])
+
+        # Handle pagination to get ALL messages
+        all_messages = []
+        while messages_url:
+            response = requests.get(messages_url, headers=headers, params=params)
+            if response.status_code != 200:
+                logger.error(f"Failed to get messages: {response.status_code}")
+                break
+
+            data = response.json()
+            all_messages.extend(data.get('value', []))
+
+            # Check for next page
+            messages_url = data.get('@odata.nextLink')
+            params = None  # nextLink includes all parameters
+
+        logger.info(f"Found {len(all_messages)} messages in the last {hours_back} hours")
+        return all_messages
     
     def get_attachments(self, message_id):
         """Get attachments from a message"""
@@ -298,12 +319,12 @@ class OutlookClient:
         """Send email via Microsoft Graph API"""
         if not self.access_token:
             raise Exception("Not authenticated")
-        
+
         headers = {
             'Authorization': f'Bearer {self.access_token}',
             'Content-Type': 'application/json'
         }
-        
+
         email_data = {
             'message': {
                 'subject': subject,
@@ -320,15 +341,59 @@ class OutlookClient:
                 ]
             }
         }
-        
+
         send_url = "https://graph.microsoft.com/v1.0/me/sendMail"
         response = requests.post(send_url, headers=headers, json=email_data)
-        
+
         if response.status_code == 202:
             logger.info("Email sent successfully via Outlook")
             return True
         else:
             logger.error(f"Failed to send email: {response.status_code} - {response.text}")
+            return False
+
+    def get_folder_id(self, folder_name):
+        """Get folder ID by name"""
+        if not self.access_token:
+            raise Exception("Not authenticated")
+
+        headers = {'Authorization': f'Bearer {self.access_token}'}
+        folders_url = "https://graph.microsoft.com/v1.0/me/mailFolders"
+        params = {'includeHiddenFolders': 'true'}
+
+        response = requests.get(folders_url, headers=headers, params=params)
+
+        if response.status_code != 200:
+            logger.error(f"Failed to get folders: {response.status_code}")
+            return None
+
+        for folder in response.json().get('value', []):
+            if folder['displayName'] == folder_name:
+                return folder['id']
+
+        return None
+
+    def move_message(self, message_id, dest_folder_name):
+        """Move a message to a destination folder"""
+        if not self.access_token:
+            raise Exception("Not authenticated")
+
+        # Get destination folder ID
+        dest_folder_id = self.get_folder_id(dest_folder_name)
+        if not dest_folder_id:
+            logger.warning(f"Destination folder '{dest_folder_name}' not found - skipping move")
+            return False
+
+        headers = {'Authorization': f'Bearer {self.access_token}'}
+        move_url = f"https://graph.microsoft.com/v1.0/me/messages/{message_id}/move"
+        body = {'destinationId': dest_folder_id}
+
+        response = requests.post(move_url, headers=headers, json=body)
+
+        if response.status_code in [200, 201]:
+            return True
+        else:
+            logger.warning(f"Failed to move message: {response.status_code}")
             return False
 
 class DMARCParser:
@@ -766,7 +831,7 @@ def main():
     
     try:
         # Initialize clients and database
-        outlook_client = OutlookClient(CONFIG['microsoft'])
+        outlook_client = OutlookClient(CONFIG['microsoft'], CONFIG['email'])
         claude_analyzer = ClaudeAnalyzer(CONFIG['claude']['api_key'], CONFIG['claude']['model'])
         dmarc_parser = DMARCParser()
         database = DMARCDatabase()
@@ -829,7 +894,10 @@ def main():
         )
         
         logger.info(f"Found {len(messages)} messages in the last {lookback_hours:.1f} hours")
-        
+
+        # Track processed messages for moving to processed folder
+        processed_message_ids = []
+
         # Process each message
         for message in messages:
             if not message.get('hasAttachments'):
@@ -901,9 +969,25 @@ Raw Report Summary:
                 
                 with open(analysis_file, 'w') as f:
                     f.write(individual_summary)
-                
+
                 logger.info(f"Successfully analyzed report for {parsed_report['policy']['domain']}")
-        
+
+                # Mark this message as successfully processed
+                if message['id'] not in processed_message_ids:
+                    processed_message_ids.append(message['id'])
+
+        # Move processed messages to the "DMARC Processed" folder
+        if processed_message_ids and CONFIG['email'].get('processed_folder'):
+            processed_folder = CONFIG['email']['processed_folder']
+            logger.info(f"Moving {len(processed_message_ids)} processed messages to '{processed_folder}' folder")
+
+            moved_count = 0
+            for message_id in processed_message_ids:
+                if outlook_client.move_message(message_id, processed_folder):
+                    moved_count += 1
+
+            logger.info(f"Successfully moved {moved_count} of {len(processed_message_ids)} messages")
+
         # Generate intelligent report using Phase 2 enhanced reporting
         report_data = enhanced_reporter.generate_smart_report(analyzed_reports)
         
@@ -945,7 +1029,7 @@ Raw Report Summary:
         
         # Try to send error notification
         try:
-            outlook_client = OutlookClient(CONFIG['microsoft'])
+            outlook_client = OutlookClient(CONFIG['microsoft'], CONFIG['email'])
             if outlook_client.get_access_token():
                 send_error_notification(error_msg, CONFIG, outlook_client)
         except:
