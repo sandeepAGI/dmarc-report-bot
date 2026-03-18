@@ -36,15 +36,21 @@ Automatically monitors Outlook for DMARC reports and analyzes them using Claude 
 - **🔧 Full Pagination Support (Nov 2025)** - Retrieves all messages regardless of volume (not limited to 10)
 - **🔧 Extended Lookback (Nov 2025)** - 72-hour default lookback covers weekends for Monday runs
 
-### 🚀 Phase 3 (Future Enhancements)
+### ✅ Phase 3 (Implemented — March 2026)
+- **🔧 Per-Domain Emails** - One email sent per exact DMARC domain (fixed: `connect.aileron-group.com` no longer merged with `aileron-group.com`)
+- **🔧 Plain-English Reports** - Reports redesigned for non-technical readers; no DKIM/SPF jargon without explanation
+- **🔧 Step-by-Step Fixes** - Each failing IP shows who sent it, why it failed, and exact numbered steps to fix it
+- **🔧 Clean Report Simplification** - All-clear emails are now short summaries with no AI analysis dump
+- **🔧 Human-Readable Dates** - Unix timestamps replaced with "Mar 14–17, 2026" throughout
+- **🔧 Structured Claude Output** - Claude produces parseable FAILURES/RECOMMENDATIONS sections instead of freeform text
+- **🔧 Data-Driven Issue Detection** - `_has_significant_issues()` now purely checks auth rates and trends (no fragile keyword scanning)
+- **🔧 Consolidated Recommendations** - Deduplicated across multiple report files; driven entirely by Claude (no hardcoded logic)
+
+### 🚀 Future Enhancements
+- **Email Q&A** - Reply to a report email with a question and get an AI-powered answer back
 - **Web Dashboard** - Visual trends and historical data with charts and graphs
 - **REST API** - External integrations and monitoring system connections
-- **Advanced ML Analytics** - Machine learning-based anomaly detection
-- **Multi-Tenant Support** - MSP and enterprise multi-domain management
-- **SIEM Integration** - Export to Splunk, ELK, and other security platforms
 - **Slack/Teams Integration** - Send alerts to team channels
-- **Advanced Filtering** - Domain-specific rules and custom analysis prompts
-- **Automated Response** - Auto-remediation for common DMARC issues
 
 ## Prerequisites
 
@@ -69,8 +75,8 @@ Automatically monitors Outlook for DMARC reports and analyzes them using Claude 
 ├── src/
 │   ├── dmarc_monitor.py        # Main application (enhanced with IP investigation)
 │   ├── database.py             # SQLite database management (Phase 2)
-│   ├── enhanced_reporting.py   # Intelligent reporting system (with hybrid format)
-│   └── non_technical_formatter.py # Plain English formatter for small businesses (NEW)
+│   ├── enhanced_reporting.py   # Reporting engine — clean/issue format, Claude output parsing
+│   └── non_technical_formatter.py # IP intelligence (used by database.py)
 ├── scripts/
 │   ├── setup.py                         # Configuration setup
 │   ├── retry_if_failed.py               # Retry logic for cron
@@ -424,182 +430,88 @@ python src/dmarc_monitor.py
 
 ## Output Examples
 
-### Phase 2 Enhanced Reports (Now with Non-Technical Format)
+### Phase 3 Report Formats (Current)
 
-#### NEW: Enhanced Report with Plain English (Aug 2025)
+One email is sent per exact DMARC domain. Domains with issues and domains that are clean get different formats.
 
-```text
-🚨 DMARC SECURITY REPORT - 2025-08-25 10:15:23
-============================================================
-
-🟠 OVERALL RISK LEVEL: HIGH
-Action needed this week - Significant security gaps
-
-QUICK SUMMARY FOR BUSINESS OWNER
-============================================================
-📊 Checked: 2 domain reports (81 emails)
-⚠️ Problems Found: 1 domain with issues
-✅ Working Well: 1 domain without issues
-📈 Overall Security Score: 73.3%
-
-WHAT THIS MEANS FOR YOUR BUSINESS
-============================================================
-⚠️ HIGH: 22 emails (27%) at risk of spam filtering
-📧 Important emails may end up in spam folders
-🔍 Recipients becoming suspicious of legitimate emails
-📉 Declining email reputation affecting deliverability
-
-1. training.aileron-group.com 🟠 HIGH RISK
---------------------------------------------------
-
-🔍 PLAIN ENGLISH EXPLANATION
-----------------------------------------
-🎉 Analyzed 81 emails sent using your company name
-⚠️ 73.3% passed security verification
-🔍 22 emails couldn't be verified as legitimate
-📍 Found 4 different sources of concern
-
-🔎 WHO'S SENDING FAILED EMAILS?
-----------------------------------------
-📍 Google Gmail Server (209.85.220.41)
-   Status: Legitimate Google server but not authorized in your SPF
-   Action: ADD to SPF: "include:_spf.google.com" in your DNS records
-   Confidence: 95% legitimate - Google's official servers
-
-📍 Amazon AWS Server (35.174.145.124)
-   Status: Could be legitimate service OR suspicious
-   Action: CHECK: Do you use MailChimp, SendGrid, or similar?
-   If YES → Add their SPF records
-   If NO → Monitor for spoofing attempts
-
-🛠️ HOW TO FIX THESE ISSUES
-----------------------------------------
-📝 FIX YOUR SPF RECORD (Authorized Senders List):
-   1. Log into your domain registrar (GoDaddy, Namecheap, etc.)
-   2. Go to DNS Management / DNS Settings
-   3. Find the TXT record that starts with "v=spf1"
-   4. Add: "include:_spf.google.com" for Gmail
-   5. Save changes (may take 1-24 hours to take effect)
-
-🎯 ACTION SUMMARY - WHAT TO DO NOW
-============================================================
-1. Review each domain's risk level above
-2. For HIGH risks: Take action TODAY
-3. Follow the step-by-step DIY instructions provided
-4. Save this report for your records
-```
-
-#### Legacy Technical Report Format (still included below plain English)
+#### Issue Report (when authentication failures are detected)
 
 ```text
-🚨 DMARC ISSUES DETECTED - 2025-07-11 10:15:23
-============================================================
+⚠️  DMARC Report — connect.aileron-group.com — ACTION NEEDED
+Mar 14–15, 2026
 
-EXECUTIVE SUMMARY
-• Total Reports Analyzed: 3
-• Reports with Issues: 2
-• Clean Reports: 1
-• Total Email Messages: 1,247
-• Average Authentication Rate: 87.3%
+WHAT HAPPENED
+3 out of 26 emails from connect.aileron-group.com could not be
+verified as coming from you.
 
-DOMAINS REQUIRING ATTENTION
-============================================================
+─────────────────────────────────────────────────────────────
+FAILED EMAILS — WHAT TO DO
+─────────────────────────────────────────────────────────────
 
-1. example.com (reported by Google)
---------------------------------------------------
-📊 Authentication Rate: 76.2% (952/1,247 messages)
-📈 Historical Trend: Declined (-12.5% vs 30-day avg)
-⏰ Report Period: 1634140800 to 1634227200
+⚠️ Amazon AWS (35.174.145.124) — 3 emails — INVESTIGATE
+   3 emails came from Amazon's servers, which are not on your
+   approved senders list. This could mean a service you use
+   (like a marketing tool) is sending emails without being
+   properly authorised.
 
-🔍 DETAILED FAILURE ANALYSIS:
+   1. Think about whether you use any tool that sends emails
+      for you (e.g. Mailchimp, HubSpot, Shopify).
+   2. If YES — ask your IT contact: "Can you add this service
+      to our SPF record (the list of approved email senders)?"
+   3. If NO — someone may be misusing your domain. Contact
+      your IT provider immediately.
 
-  Failed Authentication Details:
-  • 3 IP(s) with 295 failed message(s)
+⚠️ Microsoft Office 365 (2a01:111:f403::70e) — 1 emails — LIKELY OK
+   1 email came from a Microsoft server but the digital
+   signature did not match. This often happens during email
+   forwarding and is usually harmless.
 
-  • 50.63.9.60: 150 message(s) - DKIM ❌ FAIL, SPF ❌ FAIL
-    └─ Unknown Provider (50.63.x.x range) ⚠️ INVESTIGATE
-  • 192.168.1.100: 100 message(s) - DKIM ✅ PASS, SPF ❌ FAIL
-    └─ Unknown Provider
-  • 203.0.113.45: 45 message(s) - DKIM ❌ FAIL, SPF ✅ PASS
-    └─ Example ISP
+   1. No immediate action needed.
+   2. Monitor future reports. If recurring at scale, ask your
+      IT contact to check your Microsoft 365 DKIM settings.
 
-  📋 RECOMMENDED ACTIONS:
-  1. **Investigate IP range 50.63.x.x:** All failures from same subnet
-  2. **DKIM Issues:** 2 IP(s) failing DKIM - check signing configuration
-  3. **SPF Issues:** 2 IP(s) failing SPF - verify authorized senders
-  4. **Verification Steps:**
-     - Check SPF record: dig TXT example.com | grep spf
-     - Verify these IPs are legitimate senders for example.com
-     - If legitimate: update SPF record and configure DKIM
-     - If malicious: consider abuse reporting
+─────────────────────────────────────────────────────────────
+EMAILS THAT PASSED
+─────────────────────────────────────────────────────────────
+  • Microsoft Corporation (Office 365): 18 emails ✅
+  • Google LLC (Gmail): 5 emails ✅
 
-🔍 ANALYSIS & RECOMMENDATIONS:
-  • Update DKIM keys for newsletter platform
-  • Review SPF record for new IP 192.168.1.100
-  • Investigate 23.8% authentication failures
+─────────────────────────────────────────────────────────────
+RECOMMENDATIONS
+─────────────────────────────────────────────────────────────
+1. Upgrade your DMARC policy from p=none to p=quarantine.
+   Right now your policy only monitors — upgrading means
+   suspicious emails get sent to spam instead of the inbox.
+─────────────────────────────────────────────────────────────
 
-✅ CLEAN DOMAINS (1 domains)
-============================================================
-The following domains showed no significant issues:
-• aileron-group.com: 295 messages processed successfully
+─
+Report generated 2026-03-17 10:02
 ```
 
-#### Clean Status Report (when no issues found)
-```
-✅ ALL SYSTEMS HEALTHY - 2025-07-11 10:15:23
-============================================================
+#### Clean Report (when all emails verified successfully)
 
-EXECUTIVE SUMMARY
-• Total Reports Analyzed: 2
-• All domains performing well
-• Total Email Messages: 1,542
-• Average Authentication Rate: 98.7%
+```text
+✅ DMARC Report — aileron-group.com
+Mar 14–15, 2026
 
-DOMAIN STATUS
-============================================================
+Good news — all emails verified successfully this period.
 
-✅ aileron-group.com (reported by Google)
-   📊 Authentication Rate: 99.1% (1,528/1,542 messages)
-   📈 Trend: Stable (+0.3% vs 30-day avg)
-   🛡️ No failures detected since 2025-07-09
+EMAILS VERIFIED
+─────────────────────────────────────────────────────────────
+  30 total emails, 100% verified ✅
+  Reported by: Google
+─────────────────────────────────────────────────────────────
 
-✅ example.com (reported by Microsoft)
-   📊 Authentication Rate: 98.2% (491/500 messages)
-   📊 Trend: Stable (-0.1% vs 30-day avg)
-   🛡️ No failures detected in monitoring history
+─────────────────────────────────────────────────────────────
+RECOMMENDATIONS
+─────────────────────────────────────────────────────────────
+1. Upgrade your DMARC policy from p=none to p=quarantine.
+   Your current policy only monitors failures — upgrading
+   will actively protect your domain.
+─────────────────────────────────────────────────────────────
 
-============================================================
-🛡️  All DMARC policies are working effectively
-🎯 No action required at this time
-```
-
-### Legacy Consolidated Email Report (Phase 1)
-```
-DMARC Analysis Report - 2025-06-07 10:15:23
-==================================================
-
-EXECUTIVE SUMMARY  
-• Reports Analyzed: 3
-• Domains Covered: 2
-• Total Email Messages: 1,247
-• Domains: aileron-group.com, example.com
-
-DETAILED ANALYSIS
-==================================================
-
-1. aileron-group.com (reported by Google)
-   Overall Status: ✅ 98.5% authentication success
-   Authentication Results: DKIM passing, SPF aligned
-   Source Analysis: All sources recognized, no new IPs
-   Issues Found: 1.5% failures from legacy system
-   Recommendations: Update legacy system SPF record
-
-2. example.com (reported by Microsoft)
-   Overall Status: ⚠️ 87% authentication success  
-   Authentication Results: DKIM failing for newsletter system
-   Source Analysis: New IP 192.168.1.100 detected
-   Issues Found: Newsletter system DKIM signature invalid
-   Recommendations: Update DKIM keys for newsletter platform
+─
+Report generated 2026-03-17 10:02
 ```
 
 ### Retry Script Behavior
@@ -646,11 +558,12 @@ Example log output with retry:
 
 ### Smart Processing Flow
 1. **Check Last Run**: Reads `data/last_successful_run.txt` to determine lookback time
-2. **Email Retrieval**: Gets emails from "DMARC Reports" folder since last successful run
+2. **Email Retrieval**: Gets all emails from "DMARC Reports" folder since last run (paginated)
 3. **Report Parsing**: Extracts and parses XML from .gz, .zip, or .xml attachments
-4. **Claude Analysis**: Sends structured data to Claude for intelligent analysis
-5. **Consolidated Reporting**: Combines all analyses into single email with executive summary
-6. **Timestamp Tracking**: Saves successful run time to prevent duplicate processing
+4. **Claude Analysis**: Sends each report to Claude; receives structured FAILURES + RECOMMENDATIONS output
+5. **Move Processed Emails**: Processed emails moved from "DMARC Reports" → "DMARC Processed"
+6. **Per-Domain Emails**: One report email sent per exact DMARC domain (e.g. `connect.aileron-group.com` and `aileron-group.com` are separate)
+7. **Timestamp Tracking**: Saves successful run time to prevent duplicate processing
 
 ### Error Handling
 - **Authentication Failures**: Emails admin with error details
@@ -961,6 +874,14 @@ ip_intel = db.get_ip_intelligence('50.63.9.60')
 - `data/migration_completed.txt` - Migration status tracker
 
 ### Recent Improvements
+
+#### Report Redesign (March 2026)
+- **Per-domain emails**: One email per exact DMARC domain — `connect.aileron-group.com` and `aileron-group.com` no longer merged into one email
+- **Plain-English issue reports**: Each failing IP shows who sent it, why it failed, and numbered fix steps — no unexplained jargon
+- **Simplified clean reports**: All-clear emails show a short summary and recommendations only — no AI analysis dump
+- **Human-readable dates**: Unix timestamps converted to "Mar 14–17, 2026" format throughout
+- **Structured Claude output**: Claude now produces parseable FAILURES/RECOMMENDATIONS sections instead of freeform text
+- **Data-driven issue detection**: Issue threshold checks are now purely numeric (auth rate, historical trend, source spike) — no fragile keyword scanning
 
 #### Non-Technical Reporting & API Reliability (August 2025)
 - **Plain English Reports**: All technical terms explained for small business owners

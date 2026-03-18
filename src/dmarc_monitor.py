@@ -461,41 +461,35 @@ class ClaudeAnalyzer:
         
     def analyze_dmarc_report(self, parsed_report):
         """Send DMARC report to Claude for analysis"""
-        prompt = f"""
-Please analyze this DMARC report and provide a clear, actionable summary for a small business owner without IT staff:
+        prompt = f"""You are analyzing a DMARC email authentication report for a small business owner with no IT background.
 
-REPORT METADATA:
-- Organization: {parsed_report['metadata']['org_name']}
-- Report ID: {parsed_report['metadata']['report_id']}
-- Date Range: {parsed_report['metadata']['date_range']['begin']} to {parsed_report['metadata']['date_range']['end']}
+REPORT DATA:
+- Domain: {parsed_report['policy']['domain']} (DMARC policy: p={parsed_report['policy']['p']})
+- Reporting org: {parsed_report['metadata']['org_name']}
+- Period: {parsed_report['metadata']['date_range']['begin']} to {parsed_report['metadata']['date_range']['end']}
 
-POLICY:
-- Domain: {parsed_report['policy']['domain']}
-- Policy: {parsed_report['policy']['p']}
-- Subdomain Policy: {parsed_report['policy']['sp']}
-- Percentage: {parsed_report['policy']['pct']}%
-
-RECORDS:
+EMAIL RECORDS:
 {json.dumps(parsed_report['records'], indent=2)}
 
-Please provide:
-1. **Overall Status**: Pass/fail summary and key metrics
-2. **Authentication Results**: DKIM and SPF performance 
-3. **IP Investigation**: For each IP address, identify:
-   - Who owns it (Google, Microsoft, AWS, suspicious sources, etc.)
-   - Whether it's likely legitimate or suspicious
-   - If it's a known email service (Gmail, Office 365, MailChimp, SendGrid, etc.)
-   - Specific action needed (add to SPF, investigate further, block, etc.)
-4. **Issues Found**: Any authentication failures or policy violations IN PLAIN ENGLISH
-5. **DIY Recommendations**: Step-by-step actions the business owner can take themselves:
-   - Specific DNS records to add/modify
-   - Which service providers to contact
-   - What settings to check in their email service
-   - Red flags that require immediate attention
+Each record shows: source_ip (server that sent the email), count (how many emails), dkim (was email signed correctly?), spf (was sender on the approved list?). A record FAILS if EITHER dkim OR spf is not "pass".
 
-Focus on actionable insights a non-technical person can understand and implement.
-For each failed IP, explain WHO it likely is and WHAT to do about it.
-"""
+OUTPUT FORMAT — use exactly these two sections, no other text:
+
+FAILURES:
+For each FAILING record (dkim or spf not pass), write one block in this exact format:
+IP: [ip address]
+Company: [who owns this IP — e.g. "Amazon AWS", "Google", "Microsoft Office 365", "Unknown"]
+Emails: [count]
+Risk: [SUSPICIOUS / INVESTIGATE / LIKELY OK]
+What happened: [1-2 sentences in plain English — no jargon. Explain what the failure means for the business owner.]
+What to do: [Numbered step-by-step instructions. You may use technical terms like SPF record, DKIM, DNS but explain each term in plain English when first used. Focus on WHO to contact or WHAT to click.]
+
+If no failures, write: None.
+
+RECOMMENDATIONS:
+Numbered list of general improvements (e.g. upgrading DMARC policy from p={parsed_report['policy']['p']}, missing DKIM setup, etc.). Each item: one sentence explaining why, plus the exact change needed. If no improvements needed, write: None at this time.
+
+Keep total response under 500 words."""
 
         headers = {
             'Content-Type': 'application/json',
@@ -594,61 +588,58 @@ For each failed IP, explain WHO it likely is and WHAT to do about it.
                     'spf': record['spf']
                 })
         
-        # Build fallback analysis
-        analysis = f"""
-**Overall Status**: {'✅ PASS' if auth_rate >= 95 else '⚠️ NEEDS ATTENTION' if auth_rate >= 80 else '❌ CRITICAL'}
-- Authentication Rate: {auth_rate:.1f}% ({total_messages - failed_messages}/{total_messages} messages)
-- Domain: {domain}
-- Report Period: {parsed_report['metadata']['date_range']['begin']} to {parsed_report['metadata']['date_range']['end']}
+        # Build fallback analysis in the same structured format the reporting code expects
+        def identify_company(ip):
+            if '209.85.' in ip or '172.217.' in ip or '74.125.' in ip:
+                return 'Google'
+            elif '40.107.' in ip or '52.96.' in ip or '104.47.' in ip:
+                return 'Microsoft Office 365'
+            elif ip.startswith('35.') or ip.startswith('52.') or ip.startswith('54.') or ip.startswith('3.'):
+                return 'Amazon AWS'
+            else:
+                return 'Unknown'
 
-**Authentication Results**:
-- Total Messages: {total_messages}
-- Passed: {total_messages - failed_messages}
-- Failed: {failed_messages}
-"""
-        
+        analysis = "FAILURES:\n"
+
         if failed_ips:
-            analysis += "\n**IP Investigation**: (AI analysis unavailable - showing raw data)\n"
-            for ip_info in failed_ips[:5]:  # Show top 5 failed IPs
-                analysis += f"- {ip_info['ip']}: {ip_info['count']} messages"
-                analysis += f" (DKIM: {ip_info['dkim']}, SPF: {ip_info['spf']})\n"
-                
-                # Basic IP identification
-                if '209.85.' in ip_info['ip'] or '172.217.' in ip_info['ip']:
-                    analysis += "  → Likely Google/Gmail server\n"
-                elif '40.107.' in ip_info['ip'] or '52.96.' in ip_info['ip']:
-                    analysis += "  → Likely Microsoft/Office 365 server\n"
-                elif '35.' in ip_info['ip'] or '52.' in ip_info['ip'] or '54.' in ip_info['ip']:
-                    analysis += "  → Likely AWS server (check if you use email services)\n"
+            for ip_info in failed_ips[:5]:
+                company = identify_company(ip_info['ip'])
+                spf_fail = ip_info['spf'] != 'pass'
+                dkim_fail = ip_info['dkim'] != 'pass'
+                if dkim_fail and spf_fail:
+                    what_happened = f"{ip_info['count']} emails came from this server but failed both sender approval and signature checks."
+                elif spf_fail:
+                    what_happened = f"{ip_info['count']} emails came from this server, which is not on your approved senders list."
                 else:
-                    analysis += "  → Unknown provider (investigate further)\n"
-        
-        analysis += """
-**Issues Found**: """ + ('None detected' if auth_rate >= 95 else f'{failed_messages} messages failed authentication')
-        
-        analysis += """
+                    what_happened = f"{ip_info['count']} emails from this server had an invalid email signature."
 
-**DIY Recommendations**:
-"""
-        if auth_rate < 95:
-            if any(ip['spf'] != 'pass' for ip in failed_ips):
-                analysis += """1. Fix SPF Record:
-   - Log into your domain registrar
-   - Add missing senders to your SPF record
-   - For Google: add "include:_spf.google.com"
-   - For Microsoft: add "include:spf.protection.outlook.com"
-"""
-            if any(ip['dkim'] != 'pass' for ip in failed_ips):
-                analysis += """2. Fix DKIM Signing:
-   - Check your email service admin panel
-   - Enable DKIM signing for your domain
-   - Add DKIM records to your DNS
+                analysis += f"""IP: {ip_info['ip']}
+Company: {company}
+Emails: {ip_info['count']}
+Risk: INVESTIGATE
+What happened: {what_happened}
+What to do:
+1. Check if you use any {company} service that sends emails on your behalf.
+2. If yes, contact your IT provider to add this server to your approved senders list (your SPF record — the list of servers allowed to send email for your domain).
+3. If no, monitor for additional attempts from this IP.
+
 """
         else:
-            analysis += "- Your email authentication is working well\n- Continue monitoring for any changes"
-        
-        analysis += "\n\n⚠️ Note: AI-powered analysis was unavailable for this report. Showing basic analysis only."
-        
+            analysis += "None.\n"
+
+        recs = []
+        if parsed_report['policy']['p'] == 'none':
+            recs.append("1. Upgrade your DMARC policy from p=none to p=quarantine. Currently your policy only monitors failures — upgrading will actively protect your domain from spoofing by quarantining suspicious emails.")
+        if auth_rate < 95 and any(ip['dkim'] != 'pass' for ip in failed_ips):
+            recs.append(f"{len(recs)+1}. Enable DKIM signing for all your email services. DKIM is a digital signature that proves emails are genuinely from you — check your email service admin panel to enable it.")
+
+        analysis += "RECOMMENDATIONS:\n"
+        if recs:
+            analysis += '\n'.join(recs) + '\n'
+        else:
+            analysis += "None at this time.\n"
+
+        analysis += "\n(Note: AI analysis unavailable — basic analysis shown)"
         return analysis
 
 def get_last_run_time():
@@ -988,35 +979,42 @@ Raw Report Summary:
 
             logger.info(f"Successfully moved {moved_count} of {len(processed_message_ids)} messages")
 
-        # Generate intelligent report using Phase 2 enhanced reporting
-        report_data = enhanced_reporter.generate_smart_report(analyzed_reports)
-        
-        # Send report if needed
-        if enhanced_reporter.should_send_report(report_data):
-            success = outlook_client.send_email(
-                CONFIG['notifications']['email_to'],
-                report_data['subject'],
-                report_data['body']
-            )
-            
-            if success:
-                if report_data.get('has_issues', False):
-                    logger.info(f"Issue alert sent successfully ({report_data.get('issue_count', 0)} domains with issues)")
-                    # Log alert to database
-                    for report in analyzed_reports:
-                        if enhanced_reporter._has_significant_issues(report):
-                            database.log_alert(
-                                report['raw_data']['policy']['domain'],
-                                'authentication_issues',
-                                'Multiple thresholds exceeded',
-                                sent=True
-                            )
+        # Group reports by exact domain name so each domain gets its own email
+        from collections import defaultdict
+
+        domain_groups = defaultdict(list)
+        for report in analyzed_reports:
+            exact_domain = report['raw_data']['policy']['domain']
+            domain_groups[exact_domain].append(report)
+
+        # Generate and send a separate report per exact domain
+        for exact_domain, domain_reports in sorted(domain_groups.items()):
+            report_data = enhanced_reporter.generate_smart_report(domain_reports)
+
+            if enhanced_reporter.should_send_report(report_data):
+                success = outlook_client.send_email(
+                    CONFIG['notifications']['email_to'],
+                    report_data['subject'],
+                    report_data['body']
+                )
+
+                if success:
+                    if report_data.get('has_issues', False):
+                        logger.info(f"Issue alert sent for {exact_domain} ({report_data.get('issue_count', 0)} reports with issues)")
+                        for report in domain_reports:
+                            if enhanced_reporter._has_significant_issues(report):
+                                database.log_alert(
+                                    report['raw_data']['policy']['domain'],
+                                    'authentication_issues',
+                                    'Multiple thresholds exceeded',
+                                    sent=True
+                                )
+                    else:
+                        logger.info(f"Clean status report sent for {exact_domain}")
                 else:
-                    logger.info(f"Clean status report sent successfully ({report_data.get('clean_count', 0)} domains)")
+                    logger.error(f"Failed to send enhanced report for {exact_domain}")
             else:
-                logger.error("Failed to send enhanced report")
-        else:
-            logger.info("No report needed based on current configuration and analysis results")
+                logger.info(f"No report needed for {exact_domain}")
         
         # Mark run as successful
         save_last_run_time()
