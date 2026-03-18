@@ -73,7 +73,7 @@ class EnhancedReporter:
 
         domain = raw_data['policy']['domain']
         historical = self.db.compare_with_historical(domain, auth_rate)
-        if abs(historical['change']) >= self.thresholds.get('auth_rate_drop_threshold', 5.0):
+        if historical['change'] <= -self.thresholds.get('auth_rate_drop_threshold', 5.0):
             return True
 
         new_sources = len(set(r['source_ip'] for r in raw_data['records']))

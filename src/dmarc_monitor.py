@@ -315,6 +315,33 @@ class OutlookClient:
         response = requests.get(attachments_url, headers=headers)
         return response.json().get('value', [])
 
+    def get_message_body(self, message_id: str):
+        """Fetch plain-text body of a specific message"""
+        if not self.access_token:
+            raise Exception("Not authenticated")
+
+        headers = {'Authorization': f'Bearer {self.access_token}'}
+        url = f"https://graph.microsoft.com/v1.0/me/messages/{message_id}?$select=body"
+
+        response = requests.get(url, headers=headers)
+        if response.status_code != 200:
+            logger.error(f"Failed to fetch message body: {response.status_code}")
+            return None
+
+        body_obj = response.json().get('body', {})
+        content = body_obj.get('content', '')
+        content_type = body_obj.get('contentType', 'text')
+
+        if content_type.lower() == 'html':
+            import html
+            import re as _re
+            # Convert line-break tags to newlines before stripping all other tags
+            content = _re.sub(r'<br\s*/?>', '\n', content, flags=_re.IGNORECASE)
+            content = _re.sub(r'<[^>]+>', '', content)
+            content = html.unescape(content)
+
+        return content.strip() or None
+
     def send_email(self, to_email, subject, body):
         """Send email via Microsoft Graph API"""
         if not self.access_token:
@@ -641,6 +668,79 @@ What to do:
 
         analysis += "\n(Note: AI analysis unavailable — basic analysis shown)"
         return analysis
+
+    def ask_question(self, question: str, context: dict) -> str:
+        """Answer a plain-English follow-up question about a DMARC report"""
+        domain = context.get('domain', 'unknown')
+        date_range = context.get('date_range', 'unknown period')
+        auth_rate = context.get('auth_rate', '?')
+        policy = context.get('policy', 'none')
+        failures_summary = context.get('failures_summary', '')
+        claude_analysis = context.get('claude_analysis', '')
+
+        prompt = f"""You are answering a follow-up question about a DMARC email authentication report.
+
+DOMAIN: {domain}
+RECENT REPORT CONTEXT:
+- Period: {date_range}
+- Auth rate: {auth_rate}%
+- Policy: p={policy}
+- Recent failures: {failures_summary}
+
+ORIGINAL ANALYSIS:
+{claude_analysis}
+
+USER QUESTION: {question}
+
+Answer in plain English. No unexplained jargon. Be concise (under 200 words)."""
+
+        headers = {
+            'Content-Type': 'application/json',
+            'x-api-key': self.api_key,
+            'anthropic-version': '2023-06-01',
+        }
+        data = {
+            'model': self.model,
+            'max_tokens': 500,
+            'messages': [{'role': 'user', 'content': prompt}],
+        }
+
+        max_retries = 3
+        retry_delays = [2, 4, 8]
+
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(
+                    'https://api.anthropic.com/v1/messages',
+                    headers=headers,
+                    json=data,
+                    timeout=45,
+                )
+                if response.status_code == 200:
+                    return response.json()['content'][0]['text']
+                elif response.status_code == 429 and attempt < max_retries - 1:
+                    time.sleep(retry_delays[attempt])
+                    continue
+                else:
+                    logger.error(f"Claude API error in ask_question: {response.status_code}")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delays[attempt])
+                        continue
+                    return "I was unable to generate an answer at this time. Please try again later."
+            except requests.exceptions.Timeout:
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delays[attempt])
+                    continue
+                return "I was unable to generate an answer at this time (timeout)."
+            except Exception as exc:
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delays[attempt])
+                    continue
+                logger.error(f"Error in ask_question: {exc}")
+                return "I was unable to generate an answer at this time."
+
+        return "I was unable to generate an answer at this time."
+
 
 def get_last_run_time():
     """Get the timestamp of the last successful run"""

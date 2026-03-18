@@ -181,6 +181,22 @@ class DMARCDatabase:
         
         return has_issues, auth_success_rate, new_sources
     
+    def get_latest_report(self, domain: str) -> Optional[Dict]:
+        """Return the most recent report and its Claude analysis for a domain"""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT r.domain, r.date_begin, r.date_end, r.policy_p,
+                       r.total_messages, a.auth_success_rate, a.claude_analysis
+                FROM reports r
+                JOIN analyses a ON r.id = a.report_id
+                WHERE r.domain = ?
+                ORDER BY r.date_end DESC
+                LIMIT 1
+            """, (domain,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
     def get_historical_data(self, domain: str, days_back: int = 30) -> List[Dict]:
         """Get historical data for a domain for trend analysis"""
         cutoff_date = datetime.now() - timedelta(days=days_back)
