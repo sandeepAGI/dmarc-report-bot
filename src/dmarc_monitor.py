@@ -498,12 +498,12 @@ REPORT DATA:
 EMAIL RECORDS:
 {json.dumps(parsed_report['records'], indent=2)}
 
-Each record shows: source_ip (server that sent the email), count (how many emails), dkim (was email signed correctly?), spf (was sender on the approved list?). A record FAILS if EITHER dkim OR spf is not "pass".
+Each record shows: source_ip (server that sent the email), count (how many emails), disposition (what the receiving server did: "none" = delivered normally, "quarantine" = sent to spam, "reject" = blocked), dkim (was email signed correctly?), spf (was sender on the approved list?). A record is a DMARC FAILURE only when disposition is "quarantine" or "reject". Records with disposition "none" passed DMARC even if spf alone failed.
 
 OUTPUT FORMAT — use exactly these two sections, no other text:
 
 FAILURES:
-For each FAILING record (dkim or spf not pass), write one block in this exact format:
+For each record where disposition is "quarantine" or "reject", write one block in this exact format:
 IP: [ip address]
 Company: [who owns this IP — e.g. "Amazon AWS", "Google", "Microsoft Office 365", "Unknown"]
 Emails: [count]
@@ -600,19 +600,20 @@ Keep total response under 500 words."""
         total_messages = sum(record['count'] for record in parsed_report['records'])
         failed_messages = sum(
             record['count'] for record in parsed_report['records']
-            if record['dkim'] != 'pass' or record['spf'] != 'pass'
+            if record['disposition'] != 'none'
         )
         auth_rate = ((total_messages - failed_messages) / total_messages * 100) if total_messages > 0 else 100
         
         # Identify failed IPs
         failed_ips = []
         for record in parsed_report['records']:
-            if record['dkim'] != 'pass' or record['spf'] != 'pass':
+            if record['disposition'] != 'none':
                 failed_ips.append({
                     'ip': record['source_ip'],
                     'count': record['count'],
                     'dkim': record['dkim'],
-                    'spf': record['spf']
+                    'spf': record['spf'],
+                    'disposition': record['disposition'],
                 })
         
         # Build fallback analysis in the same structured format the reporting code expects
@@ -657,7 +658,7 @@ What to do:
         recs = []
         if parsed_report['policy']['p'] == 'none':
             recs.append("1. Upgrade your DMARC policy from p=none to p=quarantine. Currently your policy only monitors failures — upgrading will actively protect your domain from spoofing by quarantining suspicious emails.")
-        if auth_rate < 95 and any(ip['dkim'] != 'pass' for ip in failed_ips):
+        if auth_rate < 95 and any(ip['dkim'] != 'pass' and ip['spf'] != 'pass' for ip in failed_ips):
             recs.append(f"{len(recs)+1}. Enable DKIM signing for all your email services. DKIM is a digital signature that proves emails are genuinely from you — check your email service admin panel to enable it.")
 
         analysis += "RECOMMENDATIONS:\n"

@@ -64,7 +64,7 @@ class EnhancedReporter:
 
         successful = sum(
             r['count'] for r in raw_data['records']
-            if r['dkim'] == 'pass' and r['spf'] == 'pass'
+            if r['disposition'] == 'none'
         )
         auth_rate = (successful / total * 100) if total > 0 else 100.0
 
@@ -122,7 +122,7 @@ class EnhancedReporter:
         for report in reports:
             for r in report['raw_data']['records']:
                 total += r['count']
-                if r['dkim'] == 'pass' and r['spf'] == 'pass':
+                if r['disposition'] == 'none':
                     successful += r['count']
             org = report['raw_data']['metadata'].get('org_name', '')
             if org:
@@ -141,7 +141,7 @@ class EnhancedReporter:
         by_org: Dict[str, int] = {}
         for report in reports:
             for r in report['raw_data']['records']:
-                if r['dkim'] == 'pass' and r['spf'] == 'pass':
+                if r['disposition'] == 'none':
                     ip_intel = self.db.get_ip_intelligence(r['source_ip'])
                     org = ip_intel.get('organization', 'Unknown')
                     by_org[org] = by_org.get(org, 0) + r['count']
@@ -308,7 +308,7 @@ class EnhancedReporter:
         if not all_failures:
             for report in issues_reports:
                 for r in report['raw_data']['records']:
-                    if r['dkim'] != 'pass' or r['spf'] != 'pass':
+                    if r['disposition'] != 'none':
                         ip = r['source_ip']
                         if ip not in seen_ips:
                             seen_ips.add(ip)

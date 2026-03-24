@@ -161,7 +161,7 @@ class DMARCDatabase:
         # Calculate authentication success rate
         successful_messages = sum(
             record['count'] for record in parsed_report['records']
-            if record['dkim'] == 'pass' and record['spf'] == 'pass'
+            if record['disposition'] == 'none'
         )
         auth_success_rate = (successful_messages / total_messages) * 100
         
@@ -418,7 +418,7 @@ class DMARCDatabase:
                 FROM records rec
                 JOIN reports rep ON rec.report_id = rep.id
                 WHERE rep.domain = ? AND rep.id = ? 
-                AND (rec.dkim_result <> 'pass' OR rec.spf_result <> 'pass')
+                AND rec.disposition <> 'none'
                 ORDER BY rec.count DESC, rec.source_ip
             """, (domain, report_id))
             
@@ -432,7 +432,7 @@ class DMARCDatabase:
                 FROM reports rep
                 JOIN records rec ON rep.id = rec.report_id
                 WHERE rep.domain = ? 
-                AND (rec.dkim_result <> 'pass' OR rec.spf_result <> 'pass')
+                AND rec.disposition <> 'none'
             """, (domain,))
             
             result = cursor.fetchone()
