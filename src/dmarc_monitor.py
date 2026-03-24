@@ -481,42 +481,75 @@ class DMARCParser:
             logger.error(f"Error parsing DMARC report: {e}")
             return None
 
+def lookup_dns_dmarc_policy(domain: str):
+    """Query live DNS for the current DMARC policy. Returns e.g. 'reject' or None."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ['dig', 'TXT', f'_dmarc.{domain}', '+short'],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in result.stdout.strip().split('\n'):
+            line = line.strip('"')
+            if 'v=DMARC1' in line:
+                for part in line.split(';'):
+                    part = part.strip()
+                    if part.startswith('p='):
+                        return part[2:]
+    except Exception:
+        pass
+    return None
+
+
 class ClaudeAnalyzer:
     def __init__(self, api_key, model):
         self.api_key = api_key
         self.model = model
         
-    def analyze_dmarc_report(self, parsed_report):
+    def analyze_dmarc_report(self, parsed_report, dns_policy=None):
         """Send DMARC report to Claude for analysis"""
+        xml_policy = parsed_report['policy']['p']
+        if dns_policy:
+            policy_display = f"XML policy: p={xml_policy}, Current DNS policy: p={dns_policy}"
+        else:
+            policy_display = f"XML policy: p={xml_policy}, DNS lookup failed"
+
         prompt = f"""You are analyzing a DMARC email authentication report for a small business owner with no IT background.
 
 REPORT DATA:
-- Domain: {parsed_report['policy']['domain']} (DMARC policy: p={parsed_report['policy']['p']})
+- Domain: {parsed_report['policy']['domain']} ({policy_display})
 - Reporting org: {parsed_report['metadata']['org_name']}
 - Period: {parsed_report['metadata']['date_range']['begin']} to {parsed_report['metadata']['date_range']['end']}
 
 EMAIL RECORDS:
 {json.dumps(parsed_report['records'], indent=2)}
 
-Each record shows: source_ip (server that sent the email), count (how many emails), disposition (what the receiving server did: "none" = delivered normally, "quarantine" = sent to spam, "reject" = blocked), dkim (was email signed correctly?), spf (was sender on the approved list?). A record is a DMARC FAILURE only when disposition is "quarantine" or "reject". Records with disposition "none" passed DMARC even if spf alone failed.
+Each record shows: source_ip, count, disposition ("none" = delivered normally, "quarantine" = sent to spam, "reject" = blocked), dkim, spf. A record is a DMARC FAILURE only when disposition is "quarantine" or "reject". Records with disposition "none" passed DMARC even if spf alone failed.
 
-OUTPUT FORMAT — use exactly these two sections, no other text:
+OUTPUT FORMAT — use exactly these four sections, no other text:
+
+SOURCES:
+For EVERY source_ip in the records, write one line in this exact format:
+IP: [address] | Company: [provider name — e.g. "Amazon AWS", "Google", "Microsoft Office 365"]
 
 FAILURES:
-For each record where disposition is "quarantine" or "reject", write one block in this exact format:
+For each record where disposition is "quarantine" or "reject", write one block:
 IP: [ip address]
-Company: [who owns this IP — e.g. "Amazon AWS", "Google", "Microsoft Office 365", "Unknown"]
+Company: [provider]
 Emails: [count]
 Risk: [SUSPICIOUS / INVESTIGATE / LIKELY OK]
-What happened: [1-2 sentences in plain English — no jargon. Explain what the failure means for the business owner.]
-What to do: [Numbered step-by-step instructions. You may use technical terms like SPF record, DKIM, DNS but explain each term in plain English when first used. Focus on WHO to contact or WHAT to click.]
+What happened: [1-2 plain-English sentences]
+What to do: [Numbered step-by-step instructions]
 
 If no failures, write: None.
 
-RECOMMENDATIONS:
-Numbered list of general improvements (e.g. upgrading DMARC policy from p={parsed_report['policy']['p']}, missing DKIM setup, etc.). Each item: one sentence explaining why, plus the exact change needed. If no improvements needed, write: None at this time.
+NOTES:
+For records where disposition is "none" but spf failed (DKIM saved them), write a brief note per IP: what provider, how many emails, and that it's not a problem but adding the IP to SPF would strengthen the setup. If nothing to note, write: None.
 
-Keep total response under 500 words."""
+RECOMMENDATIONS:
+Numbered list of improvements. Use the CURRENT DNS policy (p={dns_policy or xml_policy}) not the XML policy when making policy recommendations — if DNS already shows p=reject, do NOT recommend upgrading the policy. Each item: one sentence why + exact change needed. If no improvements, write: None at this time.
+
+Keep total response under 600 words."""
 
         headers = {
             'Content-Type': 'application/json',
@@ -558,7 +591,7 @@ Keep total response under 500 words."""
                         continue
                     else:
                         logger.error(f"Claude API rate limit exceeded after {max_retries} attempts")
-                        return self._get_fallback_analysis(parsed_report)
+                        return self._get_fallback_analysis(parsed_report, dns_policy=dns_policy)
                 else:
                     logger.error(f"Claude API error: {response.status_code} - {response.text}")
                     if attempt < max_retries - 1:
@@ -567,7 +600,7 @@ Keep total response under 500 words."""
                         time.sleep(delay)
                         continue
                     else:
-                        return self._get_fallback_analysis(parsed_report)
+                        return self._get_fallback_analysis(parsed_report, dns_policy=dns_policy)
                         
             except requests.exceptions.Timeout:
                 if attempt < max_retries - 1:
@@ -577,7 +610,7 @@ Keep total response under 500 words."""
                     continue
                 else:
                     logger.error(f"Claude API timeout after {max_retries} attempts")
-                    return self._get_fallback_analysis(parsed_report)
+                    return self._get_fallback_analysis(parsed_report, dns_policy=dns_policy)
                     
             except Exception as e:
                 if attempt < max_retries - 1:
@@ -587,36 +620,20 @@ Keep total response under 500 words."""
                     continue
                 else:
                     logger.error(f"Error calling Claude API after {max_retries} attempts: {e}")
-                    return self._get_fallback_analysis(parsed_report)
+                    return self._get_fallback_analysis(parsed_report, dns_policy=dns_policy)
         
         # Should not reach here, but just in case
-        return self._get_fallback_analysis(parsed_report)
+        return self._get_fallback_analysis(parsed_report, dns_policy=dns_policy)
     
-    def _get_fallback_analysis(self, parsed_report):
+    def _get_fallback_analysis(self, parsed_report, dns_policy=None):
         """Provide basic analysis when Claude API is unavailable"""
         logger.info("Using fallback analysis due to Claude API unavailability")
-        
+
         domain = parsed_report['policy']['domain']
-        total_messages = sum(record['count'] for record in parsed_report['records'])
-        failed_messages = sum(
-            record['count'] for record in parsed_report['records']
-            if record['disposition'] != 'none'
-        )
-        auth_rate = ((total_messages - failed_messages) / total_messages * 100) if total_messages > 0 else 100
-        
-        # Identify failed IPs
-        failed_ips = []
-        for record in parsed_report['records']:
-            if record['disposition'] != 'none':
-                failed_ips.append({
-                    'ip': record['source_ip'],
-                    'count': record['count'],
-                    'dkim': record['dkim'],
-                    'spf': record['spf'],
-                    'disposition': record['disposition'],
-                })
-        
-        # Build fallback analysis in the same structured format the reporting code expects
+        xml_policy = parsed_report['policy']['p']
+        if dns_policy is None:
+            dns_policy = lookup_dns_dmarc_policy(domain)
+
         def identify_company(ip):
             if '209.85.' in ip or '172.217.' in ip or '74.125.' in ip:
                 return 'Google'
@@ -627,41 +644,55 @@ Keep total response under 500 words."""
             else:
                 return 'Unknown'
 
-        analysis = "FAILURES:\n"
+        # SOURCES section
+        unique_ips = {}
+        for record in parsed_report['records']:
+            ip = record['source_ip']
+            if ip not in unique_ips:
+                unique_ips[ip] = identify_company(ip)
 
+        analysis = "SOURCES:\n"
+        for ip, company in unique_ips.items():
+            analysis += f"IP: {ip} | Company: {company}\n"
+
+        # FAILURES section
+        failed_ips = [r for r in parsed_report['records'] if r['disposition'] != 'none']
+        analysis += "\nFAILURES:\n"
         if failed_ips:
-            for ip_info in failed_ips[:5]:
-                company = identify_company(ip_info['ip'])
-                spf_fail = ip_info['spf'] != 'pass'
-                dkim_fail = ip_info['dkim'] != 'pass'
+            for record in failed_ips[:5]:
+                company = identify_company(record['source_ip'])
+                spf_fail = record['spf'] != 'pass'
+                dkim_fail = record['dkim'] != 'pass'
                 if dkim_fail and spf_fail:
-                    what_happened = f"{ip_info['count']} emails came from this server but failed both sender approval and signature checks."
+                    what_happened = f"{record['count']} emails failed both sender approval and signature checks."
                 elif spf_fail:
-                    what_happened = f"{ip_info['count']} emails came from this server, which is not on your approved senders list."
+                    what_happened = f"{record['count']} emails came from a server not on your approved senders list."
                 else:
-                    what_happened = f"{ip_info['count']} emails from this server had an invalid email signature."
-
-                analysis += f"""IP: {ip_info['ip']}
-Company: {company}
-Emails: {ip_info['count']}
-Risk: INVESTIGATE
-What happened: {what_happened}
-What to do:
-1. Check if you use any {company} service that sends emails on your behalf.
-2. If yes, contact your IT provider to add this server to your approved senders list (your SPF record — the list of servers allowed to send email for your domain).
-3. If no, monitor for additional attempts from this IP.
-
-"""
+                    what_happened = f"{record['count']} emails had an invalid email signature."
+                analysis += f"IP: {record['source_ip']}\nCompany: {company}\nEmails: {record['count']}\nRisk: INVESTIGATE\nWhat happened: {what_happened}\nWhat to do:\n1. Check if you use any {company} service that sends emails on your behalf.\n2. If yes, contact your IT provider to add this server to your SPF record.\n3. If no, monitor for additional attempts from this IP.\n\n"
         else:
             analysis += "None.\n"
 
-        recs = []
-        if parsed_report['policy']['p'] == 'none':
-            recs.append("1. Upgrade your DMARC policy from p=none to p=quarantine. Currently your policy only monitors failures — upgrading will actively protect your domain from spoofing by quarantining suspicious emails.")
-        if auth_rate < 95 and any(ip['dkim'] != 'pass' and ip['spf'] != 'pass' for ip in failed_ips):
-            recs.append(f"{len(recs)+1}. Enable DKIM signing for all your email services. DKIM is a digital signature that proves emails are genuinely from you — check your email service admin panel to enable it.")
+        # NOTES section
+        spf_only_fails = [r for r in parsed_report['records'] if r['disposition'] == 'none' and r['spf'] != 'pass']
+        analysis += "\nNOTES:\n"
+        if spf_only_fails:
+            for record in spf_only_fails:
+                company = identify_company(record['source_ip'])
+                analysis += f"{record['count']} emails from {company} ({record['source_ip']}) passed via DKIM but SPF was not configured. Not a problem, but adding this IP to your SPF record would strengthen your setup.\n"
+        else:
+            analysis += "None.\n"
 
-        analysis += "RECOMMENDATIONS:\n"
+        # RECOMMENDATIONS section
+        effective_policy = dns_policy or xml_policy
+        recs = []
+        if effective_policy in ('none', 'quarantine'):
+            if effective_policy == 'none':
+                recs.append("1. Upgrade your DMARC policy from p=none to p=quarantine. Currently your policy only monitors failures — upgrading will quarantine suspicious emails.")
+            else:
+                recs.append("1. Consider upgrading your DMARC policy from p=quarantine to p=reject after monitoring for 2-3 months with no issues.")
+
+        analysis += "\nRECOMMENDATIONS:\n"
         if recs:
             analysis += '\n'.join(recs) + '\n'
         else:
@@ -1024,8 +1055,9 @@ def main():
                 if not parsed_report:
                     continue
                 
-                # Analyze with Claude
-                analysis = claude_analyzer.analyze_dmarc_report(parsed_report)
+                # Analyze with Claude (with live DNS policy)
+                dns_policy = lookup_dns_dmarc_policy(parsed_report['policy']['domain'])
+                analysis = claude_analyzer.analyze_dmarc_report(parsed_report, dns_policy=dns_policy)
                 
                 # Store in database for historical tracking
                 db_report_id = database.store_report(parsed_report, analysis)

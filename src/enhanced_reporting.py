@@ -57,33 +57,11 @@ class EnhancedReporter:
     # ─────────────────────────────────────────────────────────────
 
     def _has_significant_issues(self, report: Dict) -> bool:
-        raw_data = report['raw_data']
-        total = sum(r['count'] for r in raw_data['records'])
-        if total < self.thresholds.get('minimum_messages_for_alert', 10):
-            return False
-
-        successful = sum(
-            r['count'] for r in raw_data['records']
-            if r['disposition'] == 'none'
+        """A report has issues only when at least one email was quarantined or rejected."""
+        return any(
+            r['disposition'] != 'none'
+            for r in report['raw_data']['records']
         )
-        auth_rate = (successful / total * 100) if total > 0 else 100.0
-
-        if auth_rate < self.thresholds.get('auth_success_rate_min', 95.0):
-            return True
-
-        domain = raw_data['policy']['domain']
-        historical = self.db.compare_with_historical(domain, auth_rate)
-        if historical['change'] <= -self.thresholds.get('auth_rate_drop_threshold', 5.0):
-            return True
-
-        new_sources = len(set(r['source_ip'] for r in raw_data['records']))
-        hist_data = self.db.get_historical_data(domain, days_back=7)
-        if hist_data:
-            avg_sources = sum(h['new_sources_detected'] for h in hist_data) / len(hist_data)
-            if new_sources > avg_sources + self.thresholds.get('new_sources_threshold', 3):
-                return True
-
-        return False
 
     # ─────────────────────────────────────────────────────────────
     # Helpers — stats and formatting
@@ -136,14 +114,15 @@ class EnhancedReporter:
             'reporters': sorted(reporters),
         }
 
-    def _get_passing_summary(self, reports: List[Dict]) -> Dict[str, int]:
-        """Map organization name → count of passing emails."""
+    def _get_passing_summary(self, reports: List[Dict], sources: Dict[str, str] = None) -> Dict[str, int]:
+        """Map organization name → count of passing emails using Claude's provider names."""
+        if sources is None:
+            sources = {}
         by_org: Dict[str, int] = {}
         for report in reports:
             for r in report['raw_data']['records']:
                 if r['disposition'] == 'none':
-                    ip_intel = self.db.get_ip_intelligence(r['source_ip'])
-                    org = ip_intel.get('organization', 'Unknown')
+                    org = sources.get(r['source_ip'], 'Unknown Provider')
                     by_org[org] = by_org.get(org, 0) + r['count']
         return by_org
 
@@ -151,12 +130,41 @@ class EnhancedReporter:
     # Claude output parsing
     # ─────────────────────────────────────────────────────────────
 
+    def _parse_claude_sources(self, claude_analysis: str) -> Dict[str, str]:
+        """Parse SOURCES section → {ip: company_name}."""
+        sources: Dict[str, str] = {}
+        # Extract text between SOURCES: and FAILURES:
+        m = re.search(r'SOURCES:\s*\n(.*?)(?=\nFAILURES:)', claude_analysis, re.DOTALL | re.IGNORECASE)
+        if not m:
+            return sources
+        for line in m.group(1).strip().split('\n'):
+            # Format: IP: x.x.x.x | Company: Name
+            ip_match = re.match(r'IP:\s*(\S+)\s*\|\s*Company:\s*(.+)', line, re.IGNORECASE)
+            if ip_match:
+                sources[ip_match.group(1).strip()] = ip_match.group(2).strip()
+        return sources
+
+    def _parse_claude_notes(self, claude_analysis: str) -> List[str]:
+        """Parse NOTES section → list of informational note strings."""
+        m = re.search(r'\nNOTES:\s*\n(.*?)(?=\nRECOMMENDATIONS:)', claude_analysis, re.DOTALL | re.IGNORECASE)
+        if not m:
+            return []
+        text = m.group(1).strip()
+        if text.lower().rstrip('.') in ('none', 'n/a'):
+            return []
+        return [line.strip() for line in text.split('\n') if line.strip()]
+
     def _parse_claude_failures(self, claude_analysis: str) -> List[Dict]:
         """Parse the structured FAILURES: section from Claude's output."""
         failures = []
-        # Split on RECOMMENDATIONS section
-        parts = re.split(r'\nRECOMMENDATIONS:', claude_analysis, flags=re.IGNORECASE)
-        failures_text = re.sub(r'^FAILURES:\s*\n?', '', parts[0], flags=re.IGNORECASE).strip()
+        # Extract text between FAILURES: and NOTES: (or RECOMMENDATIONS: for backward compat)
+        m = re.search(r'\nFAILURES:\s*\n(.*?)(?=\n(?:NOTES|RECOMMENDATIONS):)', claude_analysis, re.DOTALL | re.IGNORECASE)
+        if m:
+            failures_text = m.group(1).strip()
+        else:
+            # Fallback: old two-section format
+            parts = re.split(r'\nRECOMMENDATIONS:', claude_analysis, flags=re.IGNORECASE)
+            failures_text = re.sub(r'^FAILURES:\s*\n?', '', parts[0], flags=re.IGNORECASE).strip()
 
         if not failures_text or failures_text.lower().rstrip('.') in ('none', 'n/a'):
             return failures
@@ -172,15 +180,15 @@ class EnhancedReporter:
             current_lines: List[str] = []
 
             for line in block.split('\n'):
-                m = re.match(
+                field_match = re.match(
                     r'^(IP|Company|Emails|Risk|What happened|What to do):\s*(.*)',
                     line, re.IGNORECASE
                 )
-                if m:
+                if field_match:
                     if current_key:
                         parsed[current_key] = '\n'.join(current_lines).strip()
-                    current_key = m.group(1).lower().replace(' ', '_')
-                    current_lines = [m.group(2)]
+                    current_key = field_match.group(1).lower().replace(' ', '_')
+                    current_lines = [field_match.group(2)]
                 elif current_key:
                     current_lines.append(line)
 
@@ -220,6 +228,13 @@ class EnhancedReporter:
             recommendations.append('\n'.join(current))
         return recommendations
 
+    def _collect_sources(self, reports: List[Dict]) -> Dict[str, str]:
+        """Merge SOURCES sections across all report files → {ip: company}."""
+        merged: Dict[str, str] = {}
+        for report in reports:
+            merged.update(self._parse_claude_sources(report.get('claude_analysis', '')))
+        return merged
+
     def _get_recommendations_section(self, reports: List[Dict]) -> List[str]:
         """Collect and deduplicate recommendations across all report files."""
         all_recs: List[str] = []
@@ -257,6 +272,7 @@ class EnhancedReporter:
         domain = clean_reports[0]['raw_data']['policy']['domain']
         date_range = self._get_date_range(clean_reports)
         stats = self._get_batch_stats(clean_reports)
+        sources = self._collect_sources(clean_reports)
         reporter_list = ', '.join(stats['reporters']) if stats['reporters'] else 'various sources'
 
         subject = f"✅ DMARC Report — {domain} — All Clear"
@@ -271,6 +287,25 @@ class EnhancedReporter:
             f"  Reported by: {reporter_list}\n"
             f"{self._DIV}\n\n"
         )
+
+        # Passing summary with Claude-sourced provider names
+        passing_by_org = self._get_passing_summary(clean_reports, sources)
+        if passing_by_org:
+            body += f"EMAILS BY PROVIDER\n{self._DIV}\n"
+            for org, count in sorted(passing_by_org.items(), key=lambda x: -x[1]):
+                body += f"  • {org}: {count} emails ✅\n"
+            body += f"{self._DIV}\n\n"
+
+        # NOTES section (informational findings like SPF-only failures saved by DKIM)
+        all_notes: List[str] = []
+        for report in clean_reports:
+            all_notes.extend(self._parse_claude_notes(report.get('claude_analysis', '')))
+        if all_notes:
+            body += f"NOTES\n{self._DIV}\n"
+            for note in all_notes:
+                body += f"  {note}\n"
+            body += f"{self._DIV}\n\n"
+
         body += self._recommendations_block(clean_reports)
         body += f"\n─\nReport generated {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
 
@@ -281,6 +316,7 @@ class EnhancedReporter:
         domain = all_reports[0]['raw_data']['policy']['domain']
         date_range = self._get_date_range(all_reports)
         stats = self._get_batch_stats(all_reports)
+        sources = self._collect_sources(all_reports)
 
         subject = f"⚠️ ACTION NEEDED — DMARC Report — {domain}"
 
@@ -290,9 +326,6 @@ class EnhancedReporter:
             f"WHAT HAPPENED\n"
             f"{stats['failed']} out of {stats['total']} emails from {domain} could not be\n"
             f"verified as coming from you.\n\n"
-            f"{self._DIV}\n"
-            f"FAILED EMAILS — WHAT TO DO\n"
-            f"{self._DIV}\n"
         )
 
         # Collect and deduplicate Claude-parsed failure blocks
@@ -312,36 +345,44 @@ class EnhancedReporter:
                         ip = r['source_ip']
                         if ip not in seen_ips:
                             seen_ips.add(ip)
-                            ip_intel = self.db.get_ip_intelligence(ip)
+                            company = sources.get(ip, 'Unknown Provider')
                             all_failures.append({
                                 'ip': ip,
-                                'company': ip_intel.get('organization', 'Unknown'),
+                                'company': company,
                                 'emails': r['count'],
                                 'risk': 'INVESTIGATE',
                                 'what_happened': f"{r['count']} emails came from this server but could not be verified.",
                                 'what_to_do': 'Contact your IT provider or email service to investigate this IP address.',
                             })
 
-        for failure in all_failures:
-            ip = failure.get('ip', 'Unknown IP')
-            company = failure.get('company', 'Unknown')
-            emails = failure.get('emails', '?')
-            risk = (failure.get('risk') or 'INVESTIGATE').upper()
-            what_happened = failure.get('what_happened', '')
-            what_to_do = failure.get('what_to_do', '')
+        # Only show FAILED EMAILS section if there are failures to render
+        if all_failures:
+            body += (
+                f"{self._DIV}\n"
+                f"FAILED EMAILS — WHAT TO DO\n"
+                f"{self._DIV}\n"
+            )
 
-            risk_icon = '🚨' if risk == 'SUSPICIOUS' else '⚠️'
-            body += f"\n{risk_icon} {company} ({ip}) — {emails} emails — {risk}\n"
-            if what_happened:
-                for line in what_happened.split('\n'):
-                    body += f"   {line}\n"
-            if what_to_do:
-                body += "\n"
-                for line in what_to_do.split('\n'):
-                    body += f"   {line}\n"
+            for failure in all_failures:
+                ip = failure.get('ip', 'Unknown IP')
+                company = failure.get('company', 'Unknown')
+                emails = failure.get('emails', '?')
+                risk = (failure.get('risk') or 'INVESTIGATE').upper()
+                what_happened = failure.get('what_happened', '')
+                what_to_do = failure.get('what_to_do', '')
 
-        # Passing summary
-        passing_by_org = self._get_passing_summary(all_reports)
+                risk_icon = '🚨' if risk == 'SUSPICIOUS' else '⚠️'
+                body += f"\n{risk_icon} {company} ({ip}) — {emails} emails — {risk}\n"
+                if what_happened:
+                    for line in what_happened.split('\n'):
+                        body += f"   {line}\n"
+                if what_to_do:
+                    body += "\n"
+                    for line in what_to_do.split('\n'):
+                        body += f"   {line}\n"
+
+        # Passing summary with Claude-sourced provider names
+        passing_by_org = self._get_passing_summary(all_reports, sources)
         if passing_by_org:
             body += f"\n{self._DIV}\nEMAILS THAT PASSED\n{self._DIV}\n"
             for org, count in sorted(passing_by_org.items(), key=lambda x: -x[1]):

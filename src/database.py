@@ -165,15 +165,10 @@ class DMARCDatabase:
         )
         auth_success_rate = (successful_messages / total_messages) * 100
         
-        # Detect issues from Claude analysis and metrics
-        has_issues = (
-            auth_success_rate < 95.0 or  # Less than 95% success rate
-            'issue' in claude_analysis.lower() or
-            'problem' in claude_analysis.lower() or
-            'fail' in claude_analysis.lower() or
-            'suspicious' in claude_analysis.lower() or
-            '⚠️' in claude_analysis or
-            '❌' in claude_analysis
+        # Detect issues: disposition-based only (matches enhanced_reporting decision)
+        has_issues = any(
+            record['disposition'] != 'none'
+            for record in parsed_report['records']
         )
         
         # Check for new sources (simplified - in real implementation, compare with historical data)
