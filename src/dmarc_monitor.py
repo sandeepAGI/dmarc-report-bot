@@ -92,8 +92,13 @@ class OutlookClient:
     def get_access_token(self):
         """Get or refresh access token"""
         if os.path.exists(self.token_file):
-            with open(self.token_file, 'r') as f:
-                token_data = json.load(f)
+            try:
+                with open(self.token_file, 'r') as f:
+                    token_data = json.load(f)
+            except json.JSONDecodeError:
+                logger.warning(f"Token file corrupted — deleting and re-authenticating")
+                os.remove(self.token_file)
+                return self._get_new_token()
                 
             # Check if token is still valid (with 5-minute buffer)
             expires_at = datetime.fromisoformat(token_data.get('expires_at', '2000-01-01'))
@@ -774,6 +779,16 @@ Answer in plain English. No unexplained jargon. Be concise (under 200 words)."""
         return "I was unable to generate an answer at this time."
 
 
+def ping_healthcheck(suffix=""):
+    """Ping healthchecks.io to signal run status. suffix: '' = success, '/fail' = failure, '/start' = started."""
+    url = CONFIG.get('healthchecks', {}).get('ping_url', '').strip()
+    if not url:
+        return
+    try:
+        requests.get(f"{url.rstrip('/')}{suffix}", timeout=5)
+    except Exception as e:
+        logger.warning(f"Healthcheck ping failed: {e}")
+
 def get_last_run_time():
     """Get the timestamp of the last successful run"""
     last_run_file = "data/last_successful_run.txt"
@@ -949,9 +964,10 @@ def mark_run_as_failed():
 def main():
     """Main execution function with Phase 2 enhancements"""
     logger.info("Starting DMARC report monitor (Phase 2)")
-    
+    ping_healthcheck("/start")
+
     analyzed_reports = []
-    
+
     try:
         # Initialize clients and database
         outlook_client = OutlookClient(CONFIG['microsoft'], CONFIG['email'])
@@ -1004,6 +1020,7 @@ def main():
             error_msg = "Failed to authenticate with Microsoft Graph"
             logger.error(error_msg)
             send_error_notification(error_msg, CONFIG, outlook_client)
+            ping_healthcheck("/fail")
             mark_run_as_failed()
             return False
         
@@ -1142,6 +1159,11 @@ Raw Report Summary:
                                     'Multiple thresholds exceeded',
                                     sent=True
                                 )
+                        # Also send to issues address if configured
+                        issues_email = CONFIG['notifications'].get('email_to_issues', '').strip()
+                        if issues_email:
+                            outlook_client.send_email(issues_email, report_data['subject'], report_data['body'])
+                            logger.info(f"Issue alert also sent to {issues_email}")
                     else:
                         logger.info(f"Clean status report sent for {exact_domain}")
                 else:
@@ -1151,13 +1173,14 @@ Raw Report Summary:
         
         # Mark run as successful
         save_last_run_time()
+        ping_healthcheck()
         logger.info(f"Completed processing. Analyzed {len(analyzed_reports)} reports.")
         return True
-        
+
     except Exception as e:
         error_msg = f"Unexpected error in main execution: {str(e)}"
         logger.error(error_msg, exc_info=True)
-        
+
         # Try to send error notification
         try:
             outlook_client = OutlookClient(CONFIG['microsoft'], CONFIG['email'])
@@ -1165,7 +1188,8 @@ Raw Report Summary:
                 send_error_notification(error_msg, CONFIG, outlook_client)
         except:
             logger.error("Could not send error notification")
-        
+
+        ping_healthcheck("/fail")
         mark_run_as_failed()
         return False
 

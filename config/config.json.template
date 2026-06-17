@@ -7,7 +7,7 @@
   },
   "claude": {
     "api_key": "YOUR_CLAUDE_API_KEY_HERE",
-    "model": "claude-sonnet-4-20250514"
+    "model": "claude-sonnet-4-6"
   },
   "email": {
     "folder_name": "DMARC Reports",
@@ -18,6 +18,7 @@
   "notifications": {
     "email_results": true,
     "email_to": "your-email@example.com",
+    "email_to_issues": "",
     "email_subject_prefix": "[DMARC Analysis]",
     "quiet_mode": true,
     "send_clean_status": true
@@ -32,6 +33,9 @@
     "retention_days": 30,
     "auto_purge": true,
     "purge_on_startup": false
+  },
+  "healthchecks": {
+    "ping_url": ""
   },
   "logging": {
     "level": "INFO",
